@@ -3,41 +3,47 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Marisol Heat — a sun-soaked crime story</title>
+<title>Velora Heat — a sun-soaked crime story</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%276%27 fill=%27%2311181c%27/%3E%3Cpath fill=%27%23f0b93c%27 d=%27M16 4 28 16 16 28 4 16Z%27/%3E%3C/svg%3E">
 <style>
+  /* Palette: ink, cream, coral, gold, teal — the bay at golden hour. */
   :root {
-    --ink: #11181c;
+    --ink: #141a20;
     --cream: #f6ecd6;
     --coral: #e2604a;
-    --teal: #2f8f8a;
     --gold: #f0b93c;
+    --teal: #2f8f8a;
     --shade: rgba(14, 20, 24, 0.72);
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1418; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #141a20; }
   body {
     font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
     color: var(--cream);
     user-select: none;
     -webkit-font-smoothing: antialiased;
   }
-  #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: crosshair; }
+  #scene { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
   .hidden { display: none !important; }
 
-  /* ---------- loading ---------- */
-  #boot {
-    position: fixed; inset: 0; z-index: 90; display: grid; place-content: center; gap: 14px;
-    background: radial-gradient(120% 100% at 50% 0%, #f7cf9a 0%, #e08a5e 38%, #7d3f43 78%, #241a22 100%);
-    text-align: center;
+  /* Full-screen overlays that sit above the 3D view. */
+  #vignette {
+    position: fixed; inset: 0; z-index: 10; pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 62%, rgba(20, 10, 6, 0.32) 100%);
   }
-  #boot h1 { font-size: 44px; margin: 0; letter-spacing: 6px; text-shadow: 0 4px 18px rgba(0,0,0,.45); }
-  #boot p { margin: 0; opacity: .85; letter-spacing: 2px; font-size: 13px; text-transform: uppercase; }
-  .bar { width: 280px; height: 6px; background: rgba(0,0,0,.28); border-radius: 4px; overflow: hidden; }
-  .bar > i { display: block; height: 100%; width: 8%; background: var(--gold); transition: width .25s ease; }
+  #dmg {
+    position: fixed; inset: 0; z-index: 18; pointer-events: none; opacity: 0;
+    background: radial-gradient(ellipse at center, transparent 46%, rgba(180, 30, 22, 0.72) 100%);
+    transition: opacity .3s ease;
+  }
 
-  /* ---------- HUD ---------- */
+  /* ---------- HUD (pointer-events none; it only displays) ---------- */
   #hud { position: fixed; inset: 0; z-index: 20; pointer-events: none; }
+  #money {
+    position: absolute; top: 16px; left: 18px; font-size: 32px; font-weight: bold;
+    color: #d9f2cd; text-shadow: 2px 2px 0 rgba(0,0,0,.55); letter-spacing: 1px;
+  }
+  #money::before { content: "$"; color: #b7e29a; margin-right: 1px; }
   #hudTop { position: absolute; top: 16px; right: 18px; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
   #stars { display: flex; gap: 3px; filter: drop-shadow(0 2px 4px rgba(0,0,0,.5)); }
   #stars span { font-size: 26px; color: rgba(255,255,255,.22); text-shadow: 0 0 6px rgba(0,0,0,.5); transition: transform .12s ease, color .12s ease; }
@@ -50,68 +56,63 @@
   #clock { font-size: 13px; letter-spacing: 2px; background: var(--shade); padding: 4px 10px; border-radius: 3px; }
   #pursuit { font-size: 10px; letter-spacing: 2px; background: var(--shade); padding: 5px 9px; }
   #radioName { font-size: 10px; letter-spacing: 2px; color: var(--gold); opacity: .85; }
-  #navigation { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); background: var(--shade); padding: 6px 14px; color: var(--gold); font-size: 12px; letter-spacing: 1px; white-space: nowrap; }
 
-  #mapWrap { position: absolute; right: 18px; bottom: 18px; width: 196px; }
-  #minimap { width: 196px; height: 196px; border-radius: 50%; border: 3px solid rgba(246,236,214,.78); box-shadow: 0 8px 24px rgba(0,0,0,.42); background: #16232a; }
-  #mapMeta { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; letter-spacing: 1px; opacity: .8; }
-  #saveDot { font-style: normal; font-weight: normal; color: var(--gold); letter-spacing: 2px; text-transform: uppercase; font-size: 9px; }
+  #objective {
+    position: absolute; top: 74px; left: 18px; max-width: 380px;
+    background: var(--shade); border-left: 4px solid var(--gold); padding: 10px 14px; border-radius: 3px;
+  }
+  #objective-head { font-size: 10px; letter-spacing: 3px; color: var(--gold); text-transform: uppercase; }
+  #objective-text { font-size: 16px; line-height: 1.3; margin-top: 3px; }
+  #objective-sub { font-size: 12px; opacity: .72; margin-top: 4px; }
 
-  #hudLeft { position: absolute; left: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 9px; width: 290px; }
-  .panel { background: var(--shade); border-left: 3px solid var(--coral); padding: 8px 12px; border-radius: 3px; backdrop-filter: blur(3px); }
+  #hudLeft { position: absolute; left: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 9px; width: 280px; }
+  .panel { background: var(--shade); border-left: 3px solid var(--coral); padding: 8px 12px; border-radius: 3px; }
   .statrow { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing: 2px; }
   .track { flex: 1; height: 7px; background: rgba(255,255,255,.16); border-radius: 4px; overflow: hidden; }
   .track > i { display: block; height: 100%; width: 100%; transition: width .18s ease; }
   #hp > i { background: linear-gradient(90deg, #d8574a, #f08a5d); }
-  #ar > i { background: linear-gradient(90deg, #4c9fb8, #8ad6e0); }
-  #st > i { background: linear-gradient(90deg, #86b85f, #c9e08a); }
 
-  #money { position: absolute; top: 16px; left: 18px; font-size: 30px; font-weight: bold; color: #d9f2cd; text-shadow: 2px 2px 0 rgba(0,0,0,.55); letter-spacing: 1px; }
-  #money::before { content: "$"; color: #b7e29a; margin-right: 1px; }
-
-  #weapon { position: absolute; left: 18px; bottom: 150px; display: flex; align-items: end; gap: 9px; opacity: .95; }
-  #weapon .icon { width: 52px; height: 34px; border: 2px solid rgba(246,236,214,.6); border-radius: 4px; display: grid; place-items: center; font-size: 17px; background: var(--shade); }
-  #ammo { font-size: 22px; font-weight: bold; letter-spacing: 1px; }
-  #ammo small { font-size: 12px; opacity: .7; font-weight: normal; }
+  #mapWrap { position: absolute; right: 18px; bottom: 18px; width: 196px; }
+  #minimap {
+    width: 196px; height: 196px; border-radius: 50%;
+    border: 3px solid rgba(246,236,214,.78); box-shadow: 0 8px 24px rgba(0,0,0,.42); background: #16232a;
+  }
+  #mapMeta { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; letter-spacing: 1px; opacity: .8; }
+  #saveDot { font-style: normal; color: var(--gold); letter-spacing: 2px; text-transform: uppercase; font-size: 9px; }
 
   #speedo { position: absolute; right: 232px; bottom: 22px; text-align: right; }
   #speed { font-size: 46px; font-weight: bold; line-height: .9; text-shadow: 0 4px 12px rgba(0,0,0,.6); }
   #speedo small { display: block; font-size: 11px; letter-spacing: 4px; opacity: .75; }
   #gear { color: var(--gold); font-size: 13px; letter-spacing: 3px; }
-  .strip { position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, var(--coral), var(--gold), var(--teal)); opacity: .75; }
 
-  #objective { position: absolute; top: 74px; left: 18px; max-width: 380px; background: var(--shade); border-left: 4px solid var(--gold); padding: 10px 14px; border-radius: 3px; }
-  #objective.urgent { border-left-color: var(--coral); animation: urgent 1s ease-in-out infinite; }
-  @keyframes urgent { 0%, 100% { background: var(--shade); } 50% { background: rgba(120, 36, 26, .8); } }
-  #objective-head { font-size: 10px; letter-spacing: 3px; color: var(--gold); text-transform: uppercase; }
-  #objective-text { font-size: 16px; line-height: 1.3; margin-top: 3px; }
-  #objective-sub { font-size: 12px; opacity: .72; margin-top: 4px; }
-
-  #prompt { position: absolute; left: 50%; bottom: 128px; transform: translateX(-50%); background: var(--shade); border: 1px solid rgba(246,236,214,.3); padding: 8px 16px; border-radius: 4px; font-size: 14px; letter-spacing: 1px; }
+  #prompt {
+    position: absolute; left: 50%; bottom: 128px; transform: translateX(-50%);
+    background: var(--shade); border: 1px solid rgba(246,236,214,.3); padding: 8px 16px;
+    border-radius: 4px; font-size: 14px; letter-spacing: 1px;
+  }
   #prompt b { background: var(--cream); color: var(--ink); padding: 1px 7px; border-radius: 3px; margin-right: 6px; }
 
   #toasts { position: absolute; left: 50%; top: 24%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; }
-  .toast { background: var(--shade); padding: 8px 18px; border-radius: 3px; font-size: 15px; letter-spacing: 1px; border-bottom: 2px solid var(--gold); animation: rise .25s ease; }
+  .toast {
+    background: var(--shade); padding: 8px 18px; border-radius: 3px; font-size: 15px;
+    letter-spacing: 1px; border-bottom: 2px solid var(--gold); animation: rise .25s ease;
+  }
   .toast.cash { color: #c9f0aa; border-color: #8fce6a; }
   .toast.bad { color: #ffbbaa; border-color: var(--coral); }
   @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
-  #subs { position: absolute; left: 50%; bottom: 62px; transform: translateX(-50%); width: min(660px, 78vw); text-align: center; font-size: 17px; line-height: 1.35; text-shadow: 0 2px 6px #000; }
+  #subs {
+    position: absolute; left: 50%; bottom: 62px; transform: translateX(-50%);
+    width: min(660px, 78vw); text-align: center; font-size: 17px; line-height: 1.35; text-shadow: 0 2px 6px #000;
+  }
   #subs .who { color: var(--gold); font-size: 12px; letter-spacing: 2px; display: block; text-transform: uppercase; }
-
-  #crosshair { position: absolute; left: 50%; top: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; opacity: .8; }
-  #crosshair::before, #crosshair::after { content: ""; position: absolute; background: var(--cream); box-shadow: 0 0 3px #000; }
-  #crosshair::before { left: 10px; top: 2px; width: 2px; height: 18px; }
-  #crosshair::after { top: 10px; left: 2px; height: 2px; width: 18px; }
-
-  #dmg { position: fixed; inset: 0; z-index: 18; pointer-events: none; opacity: 0; background: radial-gradient(ellipse at center, transparent 46%, rgba(180, 30, 22, .72) 100%); transition: opacity .3s ease; }
 
   /* ---------- full map ---------- */
   #bigmap { position: fixed; inset: 0; z-index: 40; background: rgba(8, 12, 15, .93); display: grid; place-items: center; }
   #bigmap canvas { border: 2px solid rgba(246,236,214,.5); border-radius: 6px; max-height: 86vh; max-width: 86vw; }
   #bigmap h2 { position: absolute; top: 22px; left: 50%; transform: translateX(-50%); margin: 0; letter-spacing: 8px; font-size: 18px; opacity: .8; }
 
-  /* ---------- screens ---------- */
+  /* ---------- screens (title / story / pause / wasted / brief / finish) ---------- */
   .screen { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 24px; overflow: auto; }
   #title { background: linear-gradient(178deg, rgba(20, 26, 34, .18) 0%, rgba(12, 18, 24, .55) 46%, rgba(10, 15, 20, .92) 100%); }
   .card { width: min(880px, 94vw); }
@@ -120,6 +121,7 @@
   .tab { display: inline-block; background: var(--coral); color: #fff; font-size: 11px; letter-spacing: 4px; padding: 5px 12px; border-radius: 2px; margin-bottom: 14px; }
   .lede { max-width: 540px; line-height: 1.55; font-size: 15px; color: #f0e4cfcc; margin: 16px 0 22px; }
   .menu { display: flex; flex-wrap: wrap; gap: 10px; }
+
   button {
     font: inherit; font-size: 15px; letter-spacing: 2px; text-transform: uppercase; cursor: pointer;
     background: rgba(246, 236, 214, .1); color: var(--cream); border: 1px solid rgba(246,236,214,.45);
@@ -129,15 +131,19 @@
   button:disabled { opacity: .4; cursor: default; }
   button.go { background: var(--gold); color: #23190c; border-color: var(--gold); font-weight: bold; }
   button.go:hover { background: #ffd167; color: #23190c; }
+
   .keys { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 6px 18px; margin-top: 24px; font-size: 12px; color: #f0e4cfaa; }
   .keys b { color: var(--cream); background: rgba(255,255,255,.12); padding: 1px 6px; border-radius: 3px; margin-right: 6px; font-size: 11px; }
   .foot { margin-top: 18px; font-size: 11px; letter-spacing: 1px; opacity: .5; }
+
   .sheet { background: rgba(16, 23, 29, .95); border: 1px solid rgba(246,236,214,.22); border-radius: 6px; padding: 26px 28px; width: min(560px, 94vw); }
   .sheet h2 { margin: 0 0 6px; font-size: 30px; letter-spacing: 2px; text-transform: uppercase; }
   .sheet p { line-height: 1.5; color: #f0e4cfcc; font-size: 14px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+
   #wasted { background: radial-gradient(circle at center, rgba(60, 12, 10, .35), rgba(8, 8, 10, .95)); }
   #wasted h2 { font-size: 74px; letter-spacing: 10px; color: #ef7a63; margin: 0; text-transform: uppercase; }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+
   #story { background: radial-gradient(circle at 50% 20%, rgba(240, 185, 60, .18), rgba(10, 14, 18, .96)); }
   .slide { display: none; }
   .slide.on { display: block; }
@@ -145,24 +151,33 @@
   .dots { display: flex; gap: 7px; margin-top: 16px; }
   .dots i { width: 22px; height: 3px; background: rgba(255,255,255,.25); }
   .dots i.on { background: var(--gold); }
+
   .stat { display: flex; justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,.1); padding: 7px 0; font-size: 14px; }
   .stat span:last-child { color: var(--gold); font-weight: bold; }
+
+  #boot {
+    position: fixed; inset: 0; z-index: 90; display: grid; place-content: center; gap: 14px;
+    background: radial-gradient(120% 100% at 50% 0%, #f7cf9a 0%, #e08a5e 38%, #7d3f43 78%, #241a22 100%);
+    text-align: center;
+  }
+  #boot h1 { font-size: 44px; margin: 0; letter-spacing: 6px; text-shadow: 0 4px 18px rgba(0,0,0,.45); }
+  #boot p { margin: 0; opacity: .85; letter-spacing: 2px; font-size: 13px; text-transform: uppercase; }
 </style>
 </head>
 <body>
 
-<canvas id="scene" aria-label="Marisol Heat: an open-world crime game. Walk the city, steal a car, take jobs, outrun the police."></canvas>
+<canvas id="scene" aria-label="Velora Heat: an open-world crime game. Walk the city, steal a car, take jobs, outrun the police."></canvas>
+<div id="vignette"></div>
 <div id="dmg"></div>
 
 <div id="hud" class="hidden">
-  <div class="strip"></div>
   <div id="money">0</div>
   <div id="hudTop">
     <div id="stars" aria-label="wanted level"></div>
     <div id="escapeWrap" class="hidden"><div class="track" id="escapeTrack"><i id="escape" style="width:0%"></i></div><small>ESCAPE</small></div>
-    <div id="clock">MON 08:12</div>
+    <div id="clock">TUE 17:12</div>
     <div id="pursuit">COAST CLEAR</div>
-    <div id="radioName">RADIO 88 · ON AIR</div>
+    <div id="radioName">RADIO SOL · ON AIR</div>
   </div>
   <div id="objective" class="hidden">
     <div id="objective-head">Job</div>
@@ -172,42 +187,33 @@
   <div id="hudLeft">
     <div class="panel">
       <div class="statrow">HEALTH <div class="track" id="hp"><i style="width:100%"></i></div></div>
-      <div class="statrow" style="margin-top:7px">ARMOR <div class="track" id="ar"><i style="width:0%"></i></div></div>
-      <div class="statrow hidden" id="staminaRow" style="margin-top:7px">STAMINA <div class="track" id="st"><i style="width:100%"></i></div></div>
     </div>
-  </div>
-  <div id="weapon" class="hidden">
-    <div class="icon">&#9670;</div>
-    <div id="ammo">0<small> / 0</small></div>
   </div>
   <div id="speedo" class="hidden"><div id="speed">0</div><small>KM/H</small><div id="gear">D</div></div>
   <div id="mapWrap">
     <canvas id="minimap" width="392" height="392"></canvas>
-    <div id="mapMeta"><span>MARISOL BAY <b id="saveDot"></b></span><span id="district">SUNSET STRIP</span></div>
+    <div id="mapMeta"><span>VELORA BAY <b id="saveDot"></b></span><span id="district">DOWNTOWN</span></div>
   </div>
-  <div id="crosshair" class="hidden"></div>
   <div id="prompt" class="hidden"></div>
   <div id="toasts"></div>
   <div id="subs"></div>
-  <div id="navigation"></div>
 </div>
 
-<div id="bigmap" class="hidden"><h2>MARISOL BAY</h2><canvas id="bigmapCanvas" width="880" height="880"></canvas></div>
+<div id="bigmap" class="hidden"><h2>VELORA BAY</h2><canvas id="bigmapCanvas" width="880" height="880"></canvas></div>
 
 <div id="boot">
-  <h1>MARISOL HEAT</h1>
+  <h1>VELORA HEAT</h1>
   <p>pouring the concrete</p>
-  <div class="bar"><i id="bootBar"></i></div>
 </div>
 
 <div id="title" class="screen hidden">
   <div class="card">
     <div class="tab">A SUN-SOAKED CRIME STORY</div>
-    <h1 class="brand">Marisol<em>Heat</em></h1>
-    <p class="lede">Marisol Bay: six streets of pastel towers, a beach that never cools down, and a
-    garage on the west side with your name on the lease. Rafi comes home from three years away to
-    find his brother's crew in debt and the pier in someone else's hands. Run parcels, chase what's
-    owed, and keep the cops off your back long enough to buy the block back.</p>
+    <h1 class="brand">Velora<em>Heat</em></h1>
+    <p class="lede">Velora Bay: seven streets of pastel towers, a beach that never cools down, and a
+    garage on the west side with your name on the lease. Dario comes home to find his sister Nia's
+    garage in debt and the marina in someone else's hands. Run fares, carry what is owed, and keep
+    the cops off your back long enough to buy the block back.</p>
     <div class="menu">
       <button class="go" id="btnContinue">Continue</button>
       <button id="btnNew">New Game</button>
@@ -216,18 +222,15 @@
     </div>
     <div class="keys hidden" id="keyList">
       <div><b>W A S D</b> move / drive</div>
-      <div><b>MOUSE</b> look, aim</div>
+      <div><b>MOUSE</b> drag to look, click to punch</div>
       <div><b>SHIFT</b> sprint</div>
-      <div><b>LMB</b> punch / shoot</div>
       <div><b>F</b> enter / leave car</div>
       <div><b>E</b> interact, take job</div>
-      <div><b>R</b> reload</div>
-      <div><b>C / WHEEL</b> recenter / zoom camera</div>
+      <div><b>SPACE</b> handbrake</div>
       <div><b>H</b> horn</div>
       <div><b>M</b> map</div>
-      <div><b>ESC</b> pause</div>
       <div><b>Q</b> radio on / off</div>
-      <div><b>SPACE</b> handbrake</div>
+      <div><b>ESC</b> pause</div>
     </div>
     <div class="foot">Keyboard + mouse. Runs offline. Your progress saves to this browser.</div>
   </div>
@@ -238,24 +241,24 @@
     <div class="slide on">
       <div class="tab">CHAPTER ONE</div>
       <h2>Homecoming</h2>
-      <p>The bus drops Rafi at the promenade with a duffel and eleven dollars. Marisol Bay still
-      smells of coconut oil and hot asphalt. The garage on Calle Ocho is shuttered, and the sign
-      says TIGA SAUDARA in flaking paint.</p>
-      <p>His brother Bima is not there. A note is: "Parcel at the café. Don't be late. — B."</p>
+      <p>The bus drops Dario at the promenade with a duffel and eleven dollars. Velora Bay still
+      smells of coconut oil and hot asphalt. The garage on the west side is shuttered, and the sign
+      says NIA'S in flaking paint.</p>
+      <p>His sister is not there. A note is: "Fare at the promenade. Don't be late. — N."</p>
     </div>
     <div class="slide">
       <div class="tab">CHAPTER TWO</div>
       <h2>The Courier</h2>
-      <p>The parcel money was supposed to clear the debt to the pier crew. It doesn't. A coupe
-      with tinted glass takes the case off the promenade at noon, and Bima's voice on the phone is
-      flat: get it back before sunset or the garage is theirs.</p>
+      <p>The fare money was supposed to clear the debt to the marina crew. It doesn't. A gold coupe
+      takes the case off the promenade at noon, and Nia's voice on the phone is flat: get it back
+      before sunset or the garage is theirs.</p>
     </div>
     <div class="slide">
       <div class="tab">CHAPTER THREE</div>
       <h2>Sunset Run</h2>
-      <p>What's in the case is a deed. The pier, the containers, the whole west end. The crew wants
-      it back and the department wants Rafi. One car, three stars, and a garage door that has to
-      close behind him.</p>
+      <p>What's in the case is a deed. The marina, the containers, the whole west end. The crew
+      wants it back and the department wants Dario. One car, three stars, and a garage door that
+      has to close behind him.</p>
     </div>
     <div class="dots"><i class="on"></i><i></i><i></i></div>
     <div class="row"><button class="go" id="btnStoryDone">Back</button><button id="btnStoryNext">Next</button></div>
@@ -265,8 +268,7 @@
 <div id="pause" class="screen hidden">
   <div class="sheet">
     <h2>Paused</h2>
-    <p>Marisol Bay waits. Progress saves when you finish a job, when you bank cash, and every
-    half minute you stay alive.</p>
+    <p>Velora Bay waits. Progress saves when you finish a job and every half minute you stay alive.</p>
     <div class="row">
       <button class="go" id="btnResume">Resume</button>
       <button id="btnSave">Save</button>
@@ -276,8 +278,7 @@
     </div>
     <div class="keys" style="margin-top:18px">
       <div><b>W A S D</b> move / drive</div>
-      <div><b>MOUSE</b> look, aim</div>
-      <div><b>LMB</b> punch / shoot</div>
+      <div><b>MOUSE</b> drag to look, click to punch</div>
       <div><b>F</b> enter / leave car</div>
       <div><b>E</b> interact</div>
       <div><b>M</b> map</div>
@@ -307,15 +308,13 @@
 
 <div id="finish" class="screen hidden">
   <div class="sheet">
-    <h2>Marisol Heat</h2>
-    <p>The garage door comes down. Bima's crew has a block again, and the pier stays in the family.
-    The bay keeps humming outside, sun on the water, traffic on Calle Ocho.</p>
+    <h2>Velora Heat</h2>
+    <p>The garage door comes down. Nia's crew has a block again, and the marina stays in the family.
+    The bay keeps humming outside, sun on the water, traffic on the promenade.</p>
     <div id="finishStats"></div>
     <div class="row"><button class="go" id="btnFree">Keep driving</button><button id="btnFinishQuit">Title</button></div>
   </div>
 </div>
-
-<p id="status" role="status" aria-live="polite" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)"></p>
 
 <script src="./vendor/three.min.js"></script>
 <script type="module" src="./src/main.js"></script>
