@@ -1,4 +1,4 @@
-// Marisol Heat entry packaging: Node standard library only, no build and no network.
+// Velora Heat entry packaging: Node standard library only, no build and no network.
 // Copy the original procedural coastal game and live gameplay screenshots, then generate
 // the judge dossier with the unchanged competition library and its prescribed byte limits.
 //
@@ -13,7 +13,7 @@ import { buildDossier } from './vendor/makefun-game.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-// Marisol Heat ships its original procedural coastal city and four live gameplay captures.
+// Velora Heat ships its original procedural coastal city and four live gameplay captures.
 
 // The scorer's own caps (reference/gate.json): the text cap shapes the dossier bytes; the rest
 // refuse an entry the scorer would refuse, so the package fails here first, with a readable
@@ -71,13 +71,15 @@ function checkShots() {
   if (names.length < LIMITS.screenshots.min || names.length > LIMITS.screenshots.max) {
     throw new Error(`screenshots/ holds ${names.length} images, needs 3 or 4`);
   }
+  let shotBytes = 0;
   for (const name of names) {
     const full = join(dir, name);
     const size = statSync(full).size;
     if (size > LIMITS.screenshots.max_bytes) throw new Error(`screenshots/${name} is ${size} bytes, cap 256 KiB`);
     if (!['.png', '.jpg', '.jpeg'].includes(extname(name).toLowerCase())) throw new Error(`screenshots/${name} is not PNG or JPEG`);
+    shotBytes += size;
   }
-  return names;
+  return { names, bytes: shotBytes };
 }
 
 const game = checkGame();
@@ -100,4 +102,4 @@ writeFileSync(
 );
 
 // One line the entrant can read back: what was packaged, and under which caps.
-process.stdout.write(`packaged game/ (${game.files} paths, ${game.bytes} bytes), ${shots.length} screenshots, dossier.json\n`);
+process.stdout.write(`packaged game/ (${game.files} paths, ${game.bytes} bytes), ${shots.names.length} screenshots (${shots.bytes} bytes), dossier.json\n`);
