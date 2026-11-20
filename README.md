@@ -4,40 +4,46 @@
 
 # Velora Heat
 
-Velora Heat is an original open-world crime story that runs entirely in the browser.
-You play Dario, a driver in the sun-soaked coastal city of Velora, taking on four jobs
-to clear his sister Nia's garage of a $1,500 debt. Walk the streets, steal cars, outrun
-the police, and bring the gold Aurelio GT home. Everything in the game — the city, the
-characters, the cars, the story — is original and made for this entry.
+Velora Heat is a sun-soaked open-world crime story that runs entirely in the browser. You play Dario, a driver in the coastal city of Velora, taking on four jobs to save his sister Nia's garage from debt — driving fares across town, moving a package under the radar, shaking off a police pursuit, and finally stealing the gold Aurelio GT. Everything is original: the city, the characters, and the story were built from scratch for this entry.
 
 ## Play
 
-Run the development server, then open the game in a browser:
+Run the dev server from the repo root, then open the game in your browser:
 
 ```sh
 node serve.ts
-# open http://localhost:8080
 ```
 
-Controls: WASD to move and drive, Shift to run, E to enter or leave a car, Space for
-the handbrake, drag the mouse to look around, M to mute. Your money and mission
-progress save to localStorage automatically.
+Then visit http://localhost:8080.
+
+Controls:
+
+- **WASD / Arrow keys** — walk on foot, drive when in a car
+- **Shift** — run
+- **E** — enter / exit a car (walk up to a parked or stopped car)
+- **Space** — handbrake while driving
+- **Mouse** — look around
+- **M** — mute audio
+
+Progress and money save to localStorage automatically.
 
 ## Verification
 
-The game was tested end to end in a headless browser: title screen, mission brief,
-walking on foot, stealing a car, driving, police pursuit with a wanted level and an
-escape meter, all four missions, the story finish screen, and save/load. The checks
-also confirm the game boots with zero console errors and makes zero failed or external
-requests. See QA.md for the full checklist and the latest results.
+The game was tested end to end in a headless browser: title screen, mission brief, walking on foot, stealing a car, driving, police pursuit with wanted stars and an escape meter, all four missions completing in order, the story finish screen, and save/load. The checks run from the repo root:
+
+```sh
+python3 tests/verify_package.py   # entry caps: game/ size, screenshots, dossier
+python3 tests/playtest.py         # headless playthrough
+```
+
+The game boots with zero console errors and makes zero external or failed requests at runtime — Three.js is vendored under `game/vendor/` and every asset is generated locally.
 
 ## Package
 
-Build the entry output with the entrypoint. It validates the game and the screenshots
-against the scorer caps first, then copies them and writes the dossier:
+Build the submission output (game, screenshots, dossier) with the entrypoint:
 
 ```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+MAKEFUN_OUTPUT_DIR=out node main.ts
 ```
 
-The output holds `game/`, `screenshots/` and `dossier.json`, ready to hand in.
+This validates the entry against the scorer caps first — game file count and bytes, index size, screenshot count and size — and refuses with a readable error before copying anything if a cap is broken. On success, `out/` holds `game/`, `screenshots/`, and `dossier.json`.

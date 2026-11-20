@@ -1,114 +1,127 @@
-// Velora Heat entry packaging: Node standard library only, no build and no network.
-// Copy the game and live gameplay screenshots, then generate the judge dossier
-// with the competition library and its prescribed byte limits.
-//
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-
-import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { extname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+// Velora Heat — entrypoint for the make.fun gta6-01 bounty.
+// Validates the entry against the scorer caps, copies game/ and screenshots/
+// into the output directory, and writes dossier.json via the kit library.
+// Node 22 standard library only, plus ./vendor/makefun-game.ts.
+import { cp, mkdir, readdir, stat, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-
-// The scorer's own caps: the text cap shapes the dossier bytes; the rest refuse
-// an entry the scorer would refuse, so the package fails here first, with a
-// readable reason, instead of at the gate.
-const LIMITS = {
-  text_max_bytes: 163840,
-  dossier_max_bytes: 1572864,
-  screenshots: { max: 4, min: 3, max_bytes: 262144, long: 1280, short: 480 },
-  game_max_files: 993,
-  game_max_bytes: 50331648,
-  game_path_max_bytes: 1000,
-  index_max_bytes: 1048576,
+const CAPS = {
+  gameMaxFiles: 993,
+  gameMaxBytes: 48 * 1024 * 1024,
+  pathMaxBytes: 1000,
+  indexMaxBytes: 1024 * 1024,
+  dossierTextMaxBytes: 163840,
+  maxScreenshots: 4,
+  minScreenshots: 3,
+  screenshotMaxBytes: 256 * 1024,
 };
 
-// `game/` has no build step, so the tree is walked by hand: every path has to
-// stay inside the entry's own caps before anything is copied.
-function walk(dir, base = dir, files = []) {
-  for (const name of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, name.name);
-    const rel = full.slice(base.length + 1);
-    if (name.name.startsWith('.')) throw new Error(`Remove hidden entry game/${rel}`);
-    if (name.isDirectory()) {
-      files.push({ rel, size: 0 });
-      walk(full, base, files);
-    } else if (name.isFile()) files.push({ rel, size: statSync(full).size });
-    else throw new Error(`game/${rel} is not a plain file or directory (no symlinks allowed)`);
-  }
-  return files;
+const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png']);
+
+function fail(message) {
+  console.error(`error: ${message}`);
+  process.exit(1);
 }
 
-function checkGame() {
-  const root = join(here, 'game');
-  if (!existsSync(join(root, 'index.html'))) throw new Error('game/index.html is missing');
-  const files = walk(root);
-  const total = files.reduce((n, f) => n + f.size, 0);
-  if (files.length > LIMITS.game_max_files) throw new Error(`game/ holds ${files.length} paths, cap ${LIMITS.game_max_files}`);
-  if (total > LIMITS.game_max_bytes) throw new Error(`game/ is ${total} bytes, cap ${LIMITS.game_max_bytes}`);
-  for (const f of files) {
-    if (new TextEncoder().encode(`game/${f.rel}`).length > LIMITS.game_path_max_bytes) throw new Error(`game/${f.rel} is over the path byte cap`);
+async function walkGameFiles(dir, root, out, counts) {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    const rel = full.slice(root.length + 1);
+    if (Buffer.byteLength(rel, 'utf8') > CAPS.pathMaxBytes) {
+      fail(`game path too long (${Buffer.byteLength(rel, 'utf8')} bytes > ${CAPS.pathMaxBytes}): ${rel}`);
+    }
+    // The cap counts every path under game/, directories included.
+    counts.paths += 1;
+    if (entry.isDirectory()) {
+      await walkGameFiles(full, root, out, counts);
+    } else if (entry.isFile()) {
+      const info = await stat(full);
+      out.push({ rel, bytes: info.size });
+    }
   }
-  const index = files.find((f) => f.rel === 'index.html');
-  if (index.size > LIMITS.index_max_bytes) throw new Error('game/index.html is over 1 MiB');
-  return { files: files.length, bytes: total };
+  return out;
 }
 
-// The cover is the first screenshot by name, so the folder is checked rather
-// than trusted: a placeholder or an over-long edge is worth catching before
-// the judge sees the sheet.
-function checkShots() {
-  const dir = join(here, 'screenshots');
-  if (!existsSync(dir)) throw new Error('screenshots/ is missing');
-  const entries = readdirSync(dir, { withFileTypes: true });
-  if (entries.some((entry) => !entry.isFile() || entry.name.startsWith('.'))) {
-    throw new Error('screenshots/ must contain only visible, regular image files');
+async function main() {
+  const outputDir = resolve(process.env.MAKEFUN_OUTPUT_DIR || '/output');
+  const repoRoot = resolve(import.meta.dirname);
+  const gameDir = join(repoRoot, 'game');
+  const shotsDir = join(repoRoot, 'screenshots');
+
+  // --- Validation (before copying anything) ---
+
+  // game/index.html must exist.
+  let indexStat;
+  try {
+    indexStat = await stat(join(gameDir, 'index.html'));
+  } catch {
+    fail('game/index.html not found');
   }
-  const names = entries.map((entry) => entry.name).sort();
-  if (names.length < LIMITS.screenshots.min || names.length > LIMITS.screenshots.max) {
-    throw new Error(`screenshots/ holds ${names.length} images, needs 3 or 4`);
+  if (!indexStat.isFile()) fail('game/index.html is not a file');
+  if (indexStat.size > CAPS.indexMaxBytes) {
+    fail(`game/index.html is ${indexStat.size} bytes, over the ${CAPS.indexMaxBytes} byte cap`);
   }
-  let shotBytes = 0;
-  for (const name of names) {
-    const full = join(dir, name);
-    const size = statSync(full).size;
-    if (size > LIMITS.screenshots.max_bytes) throw new Error(`screenshots/${name} is ${size} bytes, cap 256 KiB`);
-    if (!['.png', '.jpg', '.jpeg'].includes(extname(name).toLowerCase())) throw new Error(`screenshots/${name} is not PNG or JPEG`);
-    shotBytes += size;
+
+  // game/ caps: at most 993 paths (files + directories), at most 48 MiB total.
+  const counts = { paths: 0 };
+  const gameFiles = await walkGameFiles(gameDir, gameDir, [], counts);
+  if (counts.paths > CAPS.gameMaxFiles) {
+    fail(`game/ holds ${counts.paths} paths, over the ${CAPS.gameMaxFiles} path cap`);
   }
-  return { names, bytes: shotBytes };
+  const gameBytes = gameFiles.reduce((sum, f) => sum + f.bytes, 0);
+  if (gameBytes > CAPS.gameMaxBytes) {
+    fail(`game/ is ${gameBytes} bytes, over the ${CAPS.gameMaxBytes} byte cap`);
+  }
+
+  // screenshots/: 3 or 4 visible regular image files, each at most 256 KiB.
+  let shotEntries;
+  try {
+    shotEntries = await readdir(shotsDir, { withFileTypes: true });
+  } catch {
+    fail('screenshots/ directory not found');
+  }
+  const shots = [];
+  for (const entry of shotEntries) {
+    if (!entry.isFile() || entry.name.startsWith('.')) continue;
+    const lower = entry.name.toLowerCase();
+    const ext = lower.slice(lower.lastIndexOf('.'));
+    if (!IMAGE_EXTS.has(ext)) {
+      fail(`screenshots/${entry.name} is not a jpg/jpeg/png image`);
+    }
+    const info = await stat(join(shotsDir, entry.name));
+    if (info.size > CAPS.screenshotMaxBytes) {
+      fail(`screenshots/${entry.name} is ${info.size} bytes, over the ${CAPS.screenshotMaxBytes} byte cap`);
+    }
+    shots.push({ name: entry.name, bytes: info.size });
+  }
+  if (shots.length < CAPS.minScreenshots || shots.length > CAPS.maxScreenshots) {
+    fail(`screenshots/ holds ${shots.length} images, need ${CAPS.minScreenshots} to ${CAPS.maxScreenshots}`);
+  }
+  const shotsBytes = shots.reduce((sum, s) => sum + s.bytes, 0);
+
+  // --- Copy + dossier ---
+  await mkdir(outputDir, { recursive: true });
+  await cp(gameDir, join(outputDir, 'game'), { recursive: true });
+  await cp(shotsDir, join(outputDir, 'screenshots'), { recursive: true });
+
+  const dossier = await buildDossier(outputDir, {
+    text_max_bytes: CAPS.dossierTextMaxBytes,
+    max_screenshots: CAPS.maxScreenshots,
+    screenshot_max_bytes: CAPS.screenshotMaxBytes,
+    game_max_files: CAPS.gameMaxFiles,
+    game_max_bytes: CAPS.gameMaxBytes,
+    path_max_bytes: CAPS.pathMaxBytes,
+  });
+  await writeFile(join(outputDir, 'dossier.json'), dossier);
+
+  const totalBytes = gameBytes + shotsBytes;
+  console.log(
+    `done: game ${gameFiles.length} files (${counts.paths} paths), ${gameBytes} bytes; ` +
+    `screenshots ${shots.length} files, ${shotsBytes} bytes; ` +
+    `total ${totalBytes} bytes; dossier.json written to ${outputDir}`,
+  );
 }
 
-const game = checkGame();
-const shots = checkShots();
-
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-mkdirSync(join(out, 'screenshots'), { recursive: true });
-cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
-
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
-    text_max_bytes: LIMITS.text_max_bytes,
-    screenshots: { max: LIMITS.screenshots.max, max_bytes: LIMITS.screenshots.max_bytes },
-    game_max_files: LIMITS.game_max_files,
-    game_max_bytes: LIMITS.game_max_bytes,
-    game_path_max_bytes: LIMITS.game_path_max_bytes,
-  }),
-);
-
-// Verify what was written: the dossier must exist and stay under the file cap
-// (1.5 MiB); the text field has its own 163,840 B cap, enforced where the
-// dossier is built.
-const dossierPath = join(out, 'dossier.json');
-if (!existsSync(dossierPath)) throw new Error('dossier.json was not written');
-const dossierBytes = statSync(dossierPath).size;
-if (dossierBytes > LIMITS.dossier_max_bytes) throw new Error(`dossier.json is ${dossierBytes} bytes, cap ${LIMITS.dossier_max_bytes}`);
-
-// One line the entrant can read back: what was packaged, and under which caps.
-process.stdout.write(`packaged game/ (${game.files} paths, ${game.bytes} bytes), ${shots.names.length} screenshots (${shots.bytes} bytes), dossier.json (${dossierBytes} bytes)\n`);
+main().catch((err) => fail(err instanceof Error ? err.message : String(err)));

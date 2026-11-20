@@ -1,38 +1,61 @@
-# QA — Velora Heat
+# QA — Velora Heat (gta6-01)
 
-How the entry was checked, and what is still open. Update this file when a check
-runs; never claim a check that did not run.
+How the entry was checked, and what is known to be weak. Re-run after any change.
 
-## Chunk 1 (foundation) — done
+## Chunk 1 checks (foundation + entrypoint)
 
-- Every chunk 1 file parses: `node --check` passes on all JS files and on main.ts.
-- The entrypoint refuses cleanly in a scratch output directory: with game/ and
-  screenshots/ incomplete it exits with a readable error (missing index or missing
-  screenshots) instead of a crash, and writes nothing.
-- The vendored Three.js build and the kit library are present as copies:
-  game/vendor/three.min.js, game/vendor/three.LICENSE.txt, vendor/makefun-game.ts.
-- The city module exposes the contract the gameplay systems need: a road network
-  with start, end and direction per road, sidewalk waypoints, car spawn points,
-  the player start in front of the garage, and the garage position.
+```sh
+node --check game/src/config.js
+node --check game/src/util.js
+node --check game/src/materials.js
+node --check game/src/lighting.js
+node --check game/src/sky.js
+node --check game/src/city.js
+node --check main.ts
+```
 
-## Chunk 3 (full playtest) — to run after chunk 3
+All must pass with no output.
 
-- Start the dev server and open the game in a headless browser.
-- Title screen, then mission brief, then play.
-- Walk on foot, steal a car, drive, and confirm the speed readout moves.
-- Police respond with wanted stars and an escape meter; escaping lowers wanted.
-- All four missions complete in order; the story finish screen shows; progress saves.
-- Zero console errors and zero failed or external requests during the whole run.
-- Four real gameplay screenshots at 1280x720, each under 256 KiB, cover first.
-- Run the entrypoint with MAKEFUN_OUTPUT_DIR set to out and confirm out/ holds
-  game/, screenshots/ and dossier.json within every cap.
+Entrypoint refusal test (expected to FAIL cleanly at this stage, because
+game/ and screenshots/ are not complete yet):
 
-## Known weak spots
+```sh
+MAKEFUN_OUTPUT_DIR=/tmp/vh-out node main.ts
+```
 
-- The city is procedural and the buildings share one window texture, so the look
-  is deliberately stylised rather than photoreal.
-- The Three.js build is loaded through an import map from the vendored file; if
-  the vendored file ever changes format, the import map line in game/index.html
-  is the one place to fix.
-- Chunk 1 on its own is not playable yet: the player, cars, traffic, police,
-  missions, HUD, minimap, audio and the main loop land in chunks 2 and 3.
+Expected: a readable `error: ...` line on stderr, exit code 1, and NO files
+copied into /tmp/vh-out. A stack trace or a crash here is a bug.
+
+## Chunk 2 checks
+
+- `node --check` every file under game/src, plus serve.ts.
+- Load the modules in Node with a throwaway import test to confirm the
+  imports resolve (do not keep the test file in the repo).
+- `node serve.ts`, then open http://localhost:8080 and confirm the page
+  serves with no failed requests.
+
+## Chunk 3 checks (full game)
+
+- Start the dev server, open the game in a headless browser, and play end
+  to end: title screen, brief, walk on foot, steal a car, drive, police
+  respond with wanted stars and an escape meter, all four missions complete,
+  story finish screen, and save.
+- Zero console errors, zero failed or external requests.
+- `python3 tests/verify_package.py` passes (game caps, screenshots, dossier).
+- `python3 tests/playtest.py` reports the playthrough working.
+- Run the entrypoint with `MAKEFUN_OUTPUT_DIR=out node main.ts` and confirm
+  out/ holds game/, screenshots/, and dossier.json within every cap.
+
+## Known weaknesses
+
+- The `buildDossier` call shape in main.ts (second argument: caps object) was
+  written from the spec prose only; the kit library file was copied, never
+  opened. If the real signature differs, the entrypoint will fail at the
+  dossier step — verify by running it once game/ and screenshots/ are
+  complete (chunk 3).
+- `index.html` references `./src/main.js`, which does not exist until chunk 3;
+  the page cannot boot until then.
+- City building counts and lamp counts were chosen for a low-end machine; if
+  the frame rate is poor on the target device, reduce tree/lamp density first.
+- The minimap canvas in index.html is a fixed 180x180 circle; HUD layout was
+  not tested against narrow viewports yet.

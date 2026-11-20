@@ -1,17 +1,20 @@
+// serve.ts — Velora Heat dev server (chunk 2)
+// Tiny static server for game/ on port 8080, Node standard library only.
+// Serves files under game/, sends the right MIME type, and refuses any path
+// that would escape game/. Run: node serve.ts  (then open http://localhost:8080)
+// Port override: PORT=8081 node serve.ts
+// Written as plain JavaScript in a .ts file (no TS-only syntax) so it passes
+// node --check and runs under Node's type stripping alike.
+
 import http from 'node:http';
-import fs from 'node:fs';
-import path from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Tiny static server for the Velora Heat game: serves files under game/ on
-// port 8080 (or $PORT), Node standard library only. Any path that resolves
-// outside game/ is refused with a 404 and never served.
+const root = resolve(fileURLToPath(new URL('.', import.meta.url)), 'game');
+const port = Number(process.env.PORT || 8080);
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const gameDir = path.resolve(__dirname, 'game');
-const PORT = Number(process.env.PORT) || 8080;
-
-const MIME: Record<string, string> = {
+const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
@@ -35,58 +38,36 @@ const MIME: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-function send404(res: http.ServerResponse, url: string): void {
-  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-  res.end('404 not found: ' + url);
-}
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url || '/', 'http://localhost');
+    let pathname = decodeURIComponent(url.pathname);
+    if (pathname === '/') pathname = '/index.html';
 
-const server = http.createServer((req, res) => {
-  const method = req.method || 'GET';
-  if (method !== 'GET' && method !== 'HEAD') {
-    res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('405 method not allowed');
-    return;
-  }
-  let rawPath = '/';
-  try {
-    rawPath = decodeURIComponent(new URL(req.url || '/', 'http://localhost').pathname);
-  } catch {
-    send404(res, req.url || '/');
-    return;
-  }
-  // Resolve inside game/ and refuse anything that escapes it (including
-  // encoded ".." segments, which resolve collapses before the prefix test).
-  const resolved = path.resolve(gameDir, '.' + rawPath);
-  if (resolved !== gameDir && !resolved.startsWith(gameDir + path.sep)) {
-    send404(res, rawPath);
-    return;
-  }
-  let filePath = resolved;
-  try {
-    const stat = fs.statSync(filePath);
-    if (stat.isDirectory()) filePath = path.join(filePath, 'index.html');
-  } catch {
-    send404(res, rawPath);
-    return;
-  }
-  // Re-check after the directory join (index.html stays inside game/).
-  if (!filePath.startsWith(gameDir + path.sep)) {
-    send404(res, rawPath);
-    return;
-  }
-  fs.readFile(filePath, (err, data) => {
-    if (err) {
-      send404(res, rawPath);
+    // Resolve inside game/ and refuse anything that escapes it.
+    const requested = resolve(join(root, normalize(pathname)));
+    if (requested !== root && !requested.startsWith(root + sep)) {
+      res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('403 forbidden\n');
       return;
     }
-    const type = MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
-    res.writeHead(200, { 'Content-Type': type, 'Content-Length': data.length });
-    if (method === 'GET') res.end(data);
-    else res.end();
-  });
-  console.log(method + ' ' + rawPath);
+
+    const data = await readFile(requested);
+    const type = MIME[extname(requested).toLowerCase()] || 'application/octet-stream';
+    res.writeHead(200, { 'content-type': type, 'cache-control': 'no-cache' });
+    res.end(data);
+  } catch (err) {
+    const code = (err && err.code) || '';
+    if (code === 'ENOENT' || code === 'EISDIR') {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('404 not found\n');
+    } else {
+      res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end('500 internal error\n');
+    }
+  }
 });
 
-server.listen(PORT, () => {
-  console.log('Velora Heat dev server: http://localhost:' + PORT + '/ (serving ' + gameDir + ')');
+server.listen(port, () => {
+  console.log(`Velora Heat dev server: http://localhost:${port}/ (serving game/)`);
 });
