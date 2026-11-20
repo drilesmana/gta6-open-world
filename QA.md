@@ -1,15 +1,38 @@
-# Marisol Heat — verification
+# QA — Velora Heat
 
-## Browser
+How the entry was checked, and what is still open. Update this file when a check
+runs; never claim a check that did not run.
 
-`python3 tests/playtest.py` uses Chromium with Python Playwright and the static server on port 8080. The renderer uses `?lite=1`; `?qa=1` exposes state to the suite only. The suite drives game input and runs the real simulation with fixed steps. It positions the player and vehicles around the larger map instead of driving every route from start to finish.
+## Chunk 1 (foundation) — done
 
-The report in `tests/last-run.json` covers the briefings, on-foot movement, driving and carjacking, punch/fire/reload, police dispatch and loss of heat, all three story chapters through the ending, load after completion, death/recovery, mission retry, audio lifecycle and request errors.
+- Every chunk 1 file parses: `node --check` passes on all JS files and on main.ts.
+- The entrypoint refuses cleanly in a scratch output directory: with game/ and
+  screenshots/ incomplete it exits with a readable error (missing index or missing
+  screenshots) instead of a crash, and writes nothing.
+- The vendored Three.js build and the kit library are present as copies:
+  game/vendor/three.min.js, game/vendor/three.LICENSE.txt, vendor/makefun-game.ts.
+- The city module exposes the contract the gameplay systems need: a road network
+  with start, end and direction per road, sidewalk waypoints, car spawn points,
+  the player start in front of the garage, and the garage position.
 
-The four submitted JPEGs are existing captures from the construction session, retained after the resumed build. Verification decodes the actual files, checks nonflat pixels, dimensions, sizes, cover order and dossier byte equality. The resumed VM timed out recapturing with software rendering; these are not new screenshots of the final code revision. The resume changes did not replace any city art.
+## Chunk 3 (full playtest) — to run after chunk 3
 
-## Hand-in
+- Start the dev server and open the game in a headless browser.
+- Title screen, then mission brief, then play.
+- Walk on foot, steal a car, drive, and confirm the speed readout moves.
+- Police respond with wanted stars and an escape meter; escaping lowers wanted.
+- All four missions complete in order; the story finish screen shows; progress saves.
+- Zero console errors and zero failed or external requests during the whole run.
+- Four real gameplay screenshots at 1280x720, each under 256 KiB, cover first.
+- Run the entrypoint with MAKEFUN_OUTPUT_DIR set to out and confirm out/ holds
+  game/, screenshots/ and dossier.json within every cap.
 
-Run `MAKEFUN_OUTPUT_DIR=out node main.ts`, then `python3 tests/verify_package.py out` with Pillow. This verifies copied bytes, directory and dossier limits, filenames and image integrity. `node main.ts` also writes the same packet directly to `/output`.
+## Known weak spots
 
-No fresh manual end-to-end drive or hardware GPU performance benchmark was performed. This local verification does not certify the competition's transcript, recording or GitHub intake checks.
+- The city is procedural and the buildings share one window texture, so the look
+  is deliberately stylised rather than photoreal.
+- The Three.js build is loaded through an import map from the vendored file; if
+  the vendored file ever changes format, the import map line in game/index.html
+  is the one place to fix.
+- Chunk 1 on its own is not playable yet: the player, cars, traffic, police,
+  missions, HUD, minimap, audio and the main loop land in chunks 2 and 3.

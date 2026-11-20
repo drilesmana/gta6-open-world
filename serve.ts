@@ -1,17 +1,15 @@
-// A tiny static server for game/ (Node 22, standard library only), so an entry can be played
-// locally without a build step: `node serve.ts` serves game/ on http://localhost:8080.
-// It sends the MIME types a browser game needs, refuses any path outside game/, and otherwise
-// does nothing clever: this is a development convenience, not a web server for the internet.
-import { createReadStream, statSync } from 'node:fs';
-import { createServer } from 'node:http';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const root = resolve(fileURLToPath(new URL('./game', import.meta.url)));
-const args = process.argv.slice(2);
-const portIndex = args.indexOf('--port');
-const requested = portIndex === -1 ? 8080 : Number(args[portIndex + 1]);
-const port = Number.isInteger(requested) && requested > 0 && requested < 65536 ? requested : 8080;
+// Tiny static server for the Velora Heat game: serves files under game/ on
+// port 8080 (or $PORT), Node standard library only. Any path that resolves
+// outside game/ is refused with a 404 and never served.
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const gameDir = path.resolve(__dirname, 'game');
+const PORT = Number(process.env.PORT) || 8080;
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -37,36 +35,58 @@ const MIME: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
-createServer((request, response) => {
-  const url = new URL(request.url ?? '/', 'http://localhost');
-  let pathname: string;
+function send404(res: http.ServerResponse, url: string): void {
+  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('404 not found: ' + url);
+}
+
+const server = http.createServer((req, res) => {
+  const method = req.method || 'GET';
+  if (method !== 'GET' && method !== 'HEAD') {
+    res.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('405 method not allowed');
+    return;
+  }
+  let rawPath = '/';
   try {
-    pathname = decodeURIComponent(url.pathname);
+    rawPath = decodeURIComponent(new URL(req.url || '/', 'http://localhost').pathname);
   } catch {
-    response.writeHead(400).end('bad request');
+    send404(res, req.url || '/');
     return;
   }
-  if (pathname.endsWith('/')) pathname += 'index.html';
-  const file = resolve(join(root, normalize(pathname)));
-  if (file !== root && !file.startsWith(root + sep)) {
-    response.writeHead(403).end('forbidden');
+  // Resolve inside game/ and refuse anything that escapes it (including
+  // encoded ".." segments, which resolve collapses before the prefix test).
+  const resolved = path.resolve(gameDir, '.' + rawPath);
+  if (resolved !== gameDir && !resolved.startsWith(gameDir + path.sep)) {
+    send404(res, rawPath);
     return;
   }
-  let size: number;
+  let filePath = resolved;
   try {
-    const stats = statSync(file);
-    if (!stats.isFile()) throw new Error('not a file');
-    size = stats.size;
+    const stat = fs.statSync(filePath);
+    if (stat.isDirectory()) filePath = path.join(filePath, 'index.html');
   } catch {
-    response.writeHead(404).end('not found');
+    send404(res, rawPath);
     return;
   }
-  response.writeHead(200, {
-    'content-type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
-    'content-length': size,
-    'cache-control': 'no-store',
+  // Re-check after the directory join (index.html stays inside game/).
+  if (!filePath.startsWith(gameDir + path.sep)) {
+    send404(res, rawPath);
+    return;
+  }
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      send404(res, rawPath);
+      return;
+    }
+    const type = MIME[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
+    res.writeHead(200, { 'Content-Type': type, 'Content-Length': data.length });
+    if (method === 'GET') res.end(data);
+    else res.end();
   });
-  createReadStream(file).pipe(response);
-}).listen(port, '127.0.0.1', () => {
-  console.log(`game/ is on http://localhost:${port}`);
+  console.log(method + ' ' + rawPath);
+});
+
+server.listen(PORT, () => {
+  console.log('Velora Heat dev server: http://localhost:' + PORT + '/ (serving ' + gameDir + ')');
 });

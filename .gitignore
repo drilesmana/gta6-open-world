@@ -1,2 +1,6 @@
-/out/
-__pycache__/
+# Build output from the entrypoint (generated, never committed).
+out/
+# Local dev and editor leftovers.
+node_modules/
+.DS_Store
+*.log
