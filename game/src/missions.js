@@ -1,261 +1,307 @@
-// Velora Heat — missions and story.
-// Four jobs, one arc: Dario drives a fare, runs a package, loses the heat,
-// then steals the Aurelio GT to clear the garage debt. Each job is a set of
-// stages with a beacon marker, a HUD objective and a briefing card. The
-// manager only reaches the game through the `world` object main.js hands it.
-import { MISSIONS } from './config.js';
-import { LANDMARKS } from './city.js';
-import { createMaterials } from './materials.js';
+// missions.js — Velora Heat mission system.
+// Four missions in order: First Fare, The Package, Lose the Heat,
+// The Big Score. Dario must save his sister Nia's garage from debt.
+// Reads the shared game state; never imports Three.js here (positions
+// are plain {x, z} pairs, converted defensively from whatever the
+// player/city objects carry).
 
-// Where each job's giver stands (a declined job waits at its giver).
-const GIVER_SPOT = {
-  fare: () => LANDMARKS.promenadeFare,
-  package: () => LANDMARKS.garage,
-  heat: () => LANDMARKS.garage,
-  score: () => LANDMARKS.garage,
-};
+import { CONFIG } from './config.js';
 
-export class Missions {
-  constructor(scene) {
-    this.scene = scene;
-    this.index = 0; // next mission to offer
-    this.active = null; // { def, stage, data }
-    this.marker = null; // { x, z } or null
-    this.waiting = false; // offered but declined; the marker sits at the giver
-    this.storyDone = false;
-    this.pulse = 0;
-    this.beacon = this.buildBeacon(scene);
-  }
-
-  // The beacon: a light pillar, a pulsing ground ring and a floating diamond.
-  buildBeacon(scene) {
-    const mats = createMaterials();
-    const beacon = new THREE.Group();
-    const pillar = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.9, 1.4, 26, 12, 1, true),
-      mats.beacon,
-    );
-    pillar.position.y = 13;
-    beacon.add(pillar);
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(1.6, 2.1, 32),
-      new THREE.MeshBasicMaterial({ color: 0xffc46b, transparent: true, opacity: 0.85, side: THREE.DoubleSide }),
-    );
-    ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.12;
-    beacon.add(ring);
-    const gem = new THREE.Mesh(
-      new THREE.OctahedronGeometry(0.55),
-      new THREE.MeshStandardMaterial({ color: 0x201808, emissive: 0xffc46b, emissiveIntensity: 3 }),
-    );
-    gem.position.y = 4.2;
-    beacon.add(gem);
-    this.beaconRing = ring;
-    this.beaconGem = gem;
-    beacon.visible = false;
-    scene.add(beacon);
-    return beacon;
-  }
-
-  get currentDef() {
-    return MISSIONS[this.index] ?? null;
-  }
-
-  offer() {
-    return this.currentDef;
-  }
-
-  // Begin the offered mission. Returns its definition for the HUD.
-  start(world) {
-    const def = this.currentDef;
-    if (!def) return null;
-    this.active = { def, stage: 0, data: {} };
-    this.waiting = false;
-    this.setupStage(world);
-    return def;
-  }
-
-  decline() {
-    this.waiting = true;
-    const def = this.currentDef;
-    if (def) {
-      const g = GIVER_SPOT[def.id]();
-      this.setMarker(g.x, g.z);
+// Try several dotted paths on an object, return the first defined value.
+function tun(obj, paths, fallback) {
+  if (!obj) return fallback;
+  for (const path of paths) {
+    const parts = path.split('.');
+    let cur = obj;
+    let ok = true;
+    for (const part of parts) {
+      if (cur === null || cur === undefined || !(part in cur)) { ok = false; break; }
+      cur = cur[part];
     }
+    if (ok && cur !== undefined && cur !== null) return cur;
   }
+  return fallback;
+}
 
-  // Walk up to the giver and press E to start a declined mission.
-  tryStartAt(x, z, world) {
-    if (this.active || !this.waiting || !this.currentDef) return false;
-    const g = GIVER_SPOT[this.currentDef.id]();
-    if (Math.hypot(x - g.x, z - g.z) < 5) {
-      this.start(world);
-      return true;
-    }
-    return false;
-  }
+// Normalise a position to {x, z}.
+function pos2(p) {
+  if (!p) return null;
+  if (Array.isArray(p) && p.length >= 2) return { x: p[0], z: p[1] };
+  if (typeof p.x === 'number' && typeof p.z === 'number') return { x: p.x, z: p.z };
+  if (typeof p.x === 'number' && typeof p.y === 'number') return { x: p.x, z: p.y };
+  return null;
+}
 
-  setMarker(x, z) {
-    this.marker = { x, z };
-    this.beacon.position.set(x, 0, z);
-    this.beacon.visible = true;
-  }
+function dist2(a, b) {
+  const dx = a.x - b.x;
+  const dz = a.z - b.z;
+  return Math.sqrt(dx * dx + dz * dz);
+}
 
-  clearMarker() {
-    this.marker = null;
-    this.beacon.visible = false;
-  }
+function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
 
-  // Point the player at the current stage: marker, objective, flavour.
-  setupStage(world) {
-    const { def, stage, data } = this.active;
-    const L = LANDMARKS;
-    if (def.id === 'fare') {
-      if (stage === 0) {
-        this.setMarker(L.promenadeFare.x, L.promenadeFare.z);
-        world.setObjective('Job · First Fare', 'Pick up Mrs. Alvarez at the promenade', 'Any car will do — hers is in the shop.');
-      } else {
-        this.setMarker(L.gallery.x, L.gallery.z);
-        world.setObjective('Job · First Fare', 'Drive Mrs. Alvarez to the Calle Verde gallery', 'Smooth driving, no sirens.');
-        world.subtitle('Mrs. Alvarez', '“The gallery, dear. And do mind the kerbs.”');
-      }
-      return;
-    }
-    if (def.id === 'package') {
-      if (stage === 0) {
-        this.setMarker(L.cafe.x, L.cafe.z);
-        world.setObjective('Job · The Package', 'Pick up the package at Café Alba', 'On foot is quieter. Mostly.');
-      } else {
-        this.setMarker(L.garage.x, L.garage.z);
-        world.setObjective('Job · The Package', 'Carry the package to the garage', 'A rival crew is on the street. Keep moving.');
-        world.police.setLevel(2);
-        world.subtitle('Nia', '“They heard about the parcel. Run the back streets!”');
-        // A rival crew car: a gold coupe that hunts the player until delivery.
-        const rival = world.traffic.makeCar('sport', 0xd9a441);
-        rival.driver = 'ai';
-        rival.setPose(world.player.x + 40, world.player.z - 30, 0);
-        data.rival = rival;
-      }
-      return;
-    }
-    if (def.id === 'heat') {
-      this.setMarker(L.safehouse.x, L.safehouse.z);
-      world.setObjective('Job · Lose the Heat', 'Reach the market safehouse', 'Three stars. Break line of sight, then run.');
-      world.police.setLevel(3);
-      world.subtitle('Nia', '“The whole department is out. The safehouse, Dario. Go!”');
-      return;
-    }
-    if (def.id === 'score') {
-      if (stage === 0) {
-        this.setMarker(L.marina.x, L.marina.z);
-        world.setObjective('Job · The Big Score', 'Find the Aurelio GT at the marina', 'Sunset gold, one of one. It is parked by the water.');
-        // Park the prize: a gold sport coupe by the marina.
-        const prize = world.traffic.spawnParked(L.marina.x - 4, L.marina.z + 6, Math.PI / 2, 'sport', 0xd9a441);
-        data.prize = prize;
-        prize.isPrize = true;
-      } else {
-        this.setMarker(L.garage.x, L.garage.z);
-        world.setObjective('Job · The Big Score', 'Bring the Aurelio GT to the garage', 'Lose the tail first if you can. The debt ends tonight.');
-        world.subtitle('Sal', '“That car clears everything, Dario. Everything.”');
+// createMissions(state): state is the shared game state object with
+// fields player, car, wanted, money, health, mission, finished, and
+// (attached by main.js) city, police, driving, goldCar.
+export function createMissions(state) {
+  const rewards = tun(CONFIG, ['missions.rewards'], [120, 180, 250, 500]);
+  const reach = tun(CONFIG, ['missions.reach', 'missionReach', 'reachRadius'], 9);
+  // City half-size derives from the block grid (blocks * blockSize / 2).
+  const half = (tun(CONFIG, ['city.blocks'], 5) * tun(CONFIG, ['city.blockSize'], 80)) / 2;
+
+  // ---- Derive the map points from the city object, defensively. ----
+  const city = tun(state, ['city'], null);
+  const start = pos2(tun(city, ['playerStart', 'playerSpawn', 'start'], null)) || { x: 0, z: 0 };
+  // Nia's garage has an explicit spot in CONFIG; fall back to the start.
+  const garage = {
+    x: tun(CONFIG, ['garage.x'], start.x),
+    z: tun(CONFIG, ['garage.z'], start.z),
+  };
+
+  // A far corner across town, for the fare drop-off.
+  const farCorner = { x: half * 0.8, z: -half * 0.8 };
+  // A mid-town point for the package pickup.
+  const midTown = { x: -half * 0.45, z: half * 0.4 };
+  // A delivery point on the far side.
+  const farSide = { x: half * 0.7, z: half * 0.65 };
+
+  // Prefer real road/car-spawn points when the city exposes them.
+  function farPointFromRoads() {
+    const roads = tun(city, ['roads', 'segments', 'roadNetwork'], null);
+    if (!Array.isArray(roads) || roads.length === 0) return null;
+    let best = null;
+    let bestD = -1;
+    for (const seg of roads) {
+      const a = pos2(tun(seg, ['start', 'a', 'from'], null) || seg);
+      const b = pos2(tun(seg, ['end', 'b', 'to'], null) || seg);
+      for (const p of [a, b]) {
+        if (!p) continue;
+        const d = dist2(p, start);
+        if (d > bestD) { bestD = d; best = p; }
       }
     }
+    return best;
   }
 
-  complete(world) {
-    const { def, data } = this.active;
-    if (data.rival) {
-      world.traffic.removeCar(data.rival);
-      data.rival = null;
+  function spawnPoint() {
+    const spawns = tun(city, ['carSpawns', 'carSpawnPoints', 'spawns', 'carSpawns'], null);
+    if (Array.isArray(spawns) && spawns.length > 0) {
+      const p = pos2(spawns[Math.floor(spawns.length / 2)]) || pos2(spawns[0]);
+      if (p) return p;
     }
-    world.addCash(def.reward);
-    world.sfx.missionDone();
-    world.vfx.cashBurst(world.player.x, 1.5, world.player.z);
-    world.toast(`Job done · +$${def.reward}`, 'cash');
-    this.active = null;
-    this.clearMarker();
-    this.index++;
-    world.save();
-    if (this.index >= MISSIONS.length) {
-      this.storyDone = true;
-      world.onStoryComplete();
+    return { x: half * 0.3, z: -half * 0.3 };
+  }
+
+  const fareTarget = farPointFromRoads() || farCorner;
+  const goldSpot = spawnPoint();
+
+  const defs = [
+    {
+      id: 'first-fare',
+      title: 'First Fare',
+      brief: 'Nia\u2019s garage is behind on rent. Take a fare across town and earn your first dollars.',
+      objective: 'Drive the fare across town to the gold marker.',
+      target: fareTarget,
+      reward: rewards[0] !== undefined ? rewards[0] : 120,
+      needCar: true,
+    },
+    {
+      id: 'the-package',
+      title: 'The Package',
+      brief: 'A client needs a package moved quietly. Pick it up on foot, then deliver it by car. Keep a low profile.',
+      objective: 'Walk to the pickup point.',
+      target: midTown,
+      reward: rewards[1] !== undefined ? rewards[1] : 180,
+      needCar: false,
+      stages: [
+        { objective: 'Walk to the pickup point.', target: midTown, needCar: false },
+        { objective: 'Deliver the package to the far marker.', target: farSide, needCar: true },
+      ],
+    },
+    {
+      id: 'lose-the-heat',
+      title: 'Lose the Heat',
+      brief: 'The police are on to you. Break the pursuit and get your wanted level back to zero.',
+      objective: 'Escape the police — get your wanted level to zero.',
+      target: garage,
+      reward: rewards[2] !== undefined ? rewards[2] : 250,
+      needCar: false,
+    },
+    {
+      id: 'the-big-score',
+      title: 'The Big Score',
+      brief: 'The gold Aurelio GT is parked uptown. Steal it and bring it home to the garage — that car clears the debt.',
+      objective: 'Steal the gold Aurelio GT.',
+      target: goldSpot,
+      reward: rewards[3] !== undefined ? rewards[3] : 500,
+      needCar: false,
+      stages: [
+        { objective: 'Steal the gold Aurelio GT.', target: goldSpot, needCar: false },
+        { objective: 'Bring the gold Aurelio GT back to the garage.', target: garage, needCar: true, needGold: true },
+      ],
+    },
+  ];
+
+  const sys = {
+    missions: defs,
+    index: 0,
+    current: defs[0],
+    target: defs[0].target,
+    finished: false,
+    storyComplete: false,
+    stage: 0,
+    started: false,
+    heatOn: false,
+    lastCompleted: null,
+    advance,
+    update,
+  };
+
+  function playerPos() {
+    const player = tun(state, ['player'], null);
+    if (!player) return null;
+    return pos2(tun(player, ['position', 'pos'], null) || player);
+  }
+
+  function isDriving() {
+    const player = tun(state, ['player'], null);
+    if (player) {
+      const d = tun(player, ['driving'], null);
+      if (typeof d === 'boolean') return d;
+      if (tun(player, ['currentCar'], null)) return true;
+    }
+    return !!tun(state, ['car'], null);
+  }
+
+  function currentCar() {
+    const player = tun(state, ['player'], null);
+    if (player) {
+      const c = tun(player, ['currentCar', 'car'], null);
+      if (c) return c;
+    }
+    return tun(state, ['car'], null);
+  }
+
+  function isGoldCar() {
+    const goldCar = tun(state, ['goldCar'], null);
+    const car = currentCar();
+    if (!car) return false;
+    if (goldCar && car === goldCar) return true;
+    const kind = tun(car, ['kind', 'type'], '');
+    const colour = tun(car, ['colour', 'color'], '');
+    return kind === 'gold' || colour === 'gold' || colour === 'golden';
+  }
+
+  function wantedLevel() {
+    const w = tun(state, ['wanted'], null);
+    if (typeof w === 'number') return w;
+    const police = tun(state, ['police'], null);
+    if (police) {
+      const pw = tun(police, ['wanted'], null);
+      if (typeof pw === 'number') return pw;
+    }
+    return 0;
+  }
+
+  function escapeProgress() {
+    const police = tun(state, ['police'], null);
+    if (police) {
+      const ep = tun(police, ['escapeProgress', 'escape'], null);
+      if (typeof ep === 'number') return ep;
+    }
+    return tun(state, ['escapeProgress'], 0);
+  }
+
+  function raiseWanted(level) {
+    const police = tun(state, ['police'], null);
+    if (police && typeof police.raiseWanted === 'function') {
+      police.raiseWanted(level);
+      return;
+    }
+    state.wanted = level;
+  }
+
+  // advance(): complete the current mission, pay the reward, move on.
+  // Returns the completed mission, or null when already finished.
+  function advance() {
+    if (sys.finished) return null;
+    const done = sys.current;
+    const reward = done.reward || 0;
+    state.money = (typeof state.money === 'number' ? state.money : 0) + reward;
+    sys.lastCompleted = done;
+    sys.index += 1;
+    sys.stage = 0;
+    sys.started = false;
+    sys.heatOn = false;
+    if (sys.index >= defs.length) {
+      sys.finished = true;
+      sys.storyComplete = true;
+      sys.current = null;
+      sys.target = null;
     } else {
-      // Offer the next job right away so the story keeps moving.
-      world.offerNext();
+      sys.current = defs[sys.index];
+      sys.target = sys.current.target;
     }
-    return def;
+    return done;
   }
 
-  // Returns 'complete' when a stage (or the mission) finishes.
-  update(dt, world) {
-    this.pulse += dt;
-    if (this.beacon.visible) {
-      const s = 1 + Math.sin(this.pulse * 3) * 0.12;
-      this.beaconRing.scale.set(s, s, s);
-      this.beaconGem.rotation.y += dt * 1.5;
-      this.beaconGem.position.y = 4.2 + Math.sin(this.pulse * 2) * 0.35;
-    }
-    if (!this.active) return null;
-    const { def, stage, data } = this.active;
-    const p = world.player;
-    const px = p.vehicle ? p.vehicle.x : p.x;
-    const pz = p.vehicle ? p.vehicle.z : p.z;
-    const near = (x, z, r) => Math.hypot(px - x, pz - z) < r;
-    const L = LANDMARKS;
+  // update(dt): check the current objective; advance when met.
+  // Returns the mission completed this frame, or null.
+  function update(dt) {
+    if (sys.finished || !sys.current) return null;
+    const p = playerPos();
+    const cur = sys.current;
 
-    if (def.id === 'fare') {
-      if (stage === 0 && near(L.promenadeFare.x, L.promenadeFare.z, 5)) {
-        this.active.stage = 1;
-        this.setupStage(world);
-        world.subtitle('Mrs. Alvarez', '“Ah, there you are. The gallery, please.”');
-      } else if (stage === 1 && near(L.gallery.x, L.gallery.z, 7)) {
-        this.complete(world);
-        return 'complete';
+    // Mission 3 setup: the heat starts the moment the mission begins.
+    if (cur.id === 'lose-the-heat' && !sys.started) {
+      sys.started = true;
+      if (wantedLevel() < 2) raiseWanted(2);
+    }
+
+    // Two-stage missions: advance the stage, not the mission.
+    if (cur.stages && sys.stage < cur.stages.length) {
+      const stageDef = cur.stages[sys.stage];
+      const target = stageDef.needGold
+        ? (pos2(tun(tun(state, ['goldCar'], null), ['position', 'pos'], null)) || cur.target)
+        : stageDef.target;
+      sys.target = target;
+      cur.objective = stageDef.objective;
+      if (p && target && dist2(p, target) <= reach) {
+        if (stageDef.needCar && !isDriving()) return null;
+        if (stageDef.needGold && !isGoldCar()) return null;
+        sys.stage += 1;
+        if (sys.stage >= cur.stages.length) return advance();
+        const next = cur.stages[sys.stage];
+        cur.objective = next.objective;
+        sys.target = next.target;
+        return null;
       }
-    } else if (def.id === 'package') {
-      if (stage === 0 && near(L.cafe.x, L.cafe.z, 4)) {
-        this.active.stage = 1;
-        this.setupStage(world);
-        world.toast('Package picked up', 'cash');
-      } else if (stage === 1) {
-        // The rival hunts the player until the delivery lands.
-        if (data.rival) world.police.drivePursuit(data.rival, dt, px, pz);
-        if (near(L.garage.x, L.garage.z, 6)) {
-          this.complete(world);
-          return 'complete';
-        }
-      }
-    } else if (def.id === 'heat') {
-      if (near(L.safehouse.x, L.safehouse.z, 6)) {
-        world.police.clear();
-        this.complete(world);
-        return 'complete';
-      }
-    } else if (def.id === 'score') {
-      if (stage === 0) {
-        // The stage advances when the player takes the prize car.
-        if (p.vehicle && p.vehicle.isPrize) {
-          this.active.stage = 1;
-          this.setupStage(world);
-          world.police.addCrime(25, 'grand-theft-auto');
-          world.toast('The Aurelio GT is yours', 'bad');
-        }
-      } else if (stage === 1 && p.vehicle && p.vehicle.isPrize && near(L.garage.x, L.garage.z, 7)) {
-        this.complete(world);
-        return 'complete';
-      }
+      return null;
+    }
+
+    // Single-stage missions.
+    const target = cur.id === 'the-big-score'
+      ? (pos2(tun(tun(state, ['goldCar'], null), ['position', 'pos'], null)) || cur.target)
+      : cur.target;
+    sys.target = target;
+
+    if (cur.id === 'lose-the-heat') {
+      // The heat must actually have been on before an escape counts.
+      // Otherwise the mission auto-completes on its first frame, before
+      // the wanted raise has propagated to the shared state.
+      if (wantedLevel() >= 2) sys.heatOn = true;
+      if (sys.heatOn && wantedLevel() <= 0) return advance();
+      return null;
+    }
+
+    if (p && target && dist2(p, target) <= reach) {
+      if (cur.needCar && !isDriving()) return null;
+      return advance();
     }
     return null;
   }
 
-  objectiveText() {
-    if (this.active) {
-      const { def, stage } = this.active;
-      if (def.id === 'fare') return stage === 0 ? 'Pick up Mrs. Alvarez' : 'Drive to the gallery';
-      if (def.id === 'package') return stage === 0 ? 'Pick up the package' : 'Deliver to the garage';
-      if (def.id === 'heat') return 'Reach the safehouse';
-      if (def.id === 'score') return stage === 0 ? 'Find the Aurelio GT' : 'Deliver the Aurelio GT';
-    }
-    if (this.waiting && this.currentDef) return `Job waiting: ${this.currentDef.title}`;
-    return 'Free roam — steal a car, take a job';
-  }
+  return sys;
 }

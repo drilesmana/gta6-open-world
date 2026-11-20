@@ -1,189 +1,205 @@
-// Velora Heat — traffic.
-// Cars drive the street grid on the right-hand lane, turn at intersections,
-// and slow for the car ahead. Parked cars are stealable: entering one is the
-// game's first crime. Traffic keeps its distance from the player by
-// despawning far away and respawning on nearby streets.
-import { Car } from './driving.js';
-import { TRAFFIC, STREETS, CITY_HALF } from './config.js';
-import { clamp, damp, rand, randi, pick, dist2 } from './util.js';
+import * as THREE from 'three';
+import { CONFIG } from './config.js';
+import { rand, randInt, pick, clamp } from './util.js';
+import { CAR_COLOURS } from './vehicles.js';
 
-const LANE = 3; // right-hand lane offset from the street centre line
+// City traffic for Velora Heat. AI cars drive along the road network: each
+// car owns a segment and a distance along it, and at the end of a segment it
+// picks a connected one. Cars stop for the car ahead on their segment (and
+// for the player's car), and cars far from the player despawn and respawn on
+// a road near the player so the streets always feel alive.
 
-// A random point on the grid: a street, a position along it, a direction.
-function randomStreetPoint() {
-  const s = pick(STREETS);
-  const v = rand(-CITY_HALF + 20, CITY_HALF - 20);
-  const dir = Math.random() < 0.5 ? 1 : -1;
-  if (Math.random() < 0.5) return { x: s, z: v, axis: 'z', dir };
-  return { x: v, z: s, axis: 'x', dir };
+function tun(keys, fallback) {
+  const c = CONFIG || {};
+  for (const k of keys) {
+    const parts = k.split('.');
+    let v = c;
+    let ok = true;
+    for (const p of parts) {
+      if (v && typeof v === 'object' && p in v) v = v[p];
+      else { ok = false; break; }
+    }
+    if (ok && typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return fallback;
 }
 
-function headingFor(axis, dir) {
-  if (axis === 'z') return dir > 0 ? 0 : Math.PI;
-  return dir > 0 ? Math.PI / 2 : -Math.PI / 2;
+function toXZ(v) {
+  if (!v) return null;
+  if (Array.isArray(v)) {
+    if (v.length >= 3) return { x: v[0], z: v[2] };
+    if (v.length >= 2) return { x: v[0], z: v[1] };
+    return null;
+  }
+  if (typeof v === 'object' && typeof v.x === 'number' && typeof v.z === 'number') {
+    return { x: v.x, z: v.z };
+  }
+  return null;
 }
 
-export class Traffic {
-  constructor(scene, colliders) {
-    this.scene = scene;
-    this.colliders = colliders;
-    this.cars = [];
-    this.parked = [];
-    this.playerCar = null;
-  }
-
-  spawnInitial(playerX, playerZ) {
-    for (let i = 0; i < TRAFFIC.count; i++) this.spawnMoving(playerX, playerZ);
-    // Parked cars near the player: the first thing to steal.
-    const spots = [
-      { x: -23, z: 150, h: Math.PI / 2 },
-      { x: 29, z: 148, h: -Math.PI / 2 },
-      { x: -130, z: 29, h: 0 },
-      { x: 78, z: -23, h: Math.PI },
-      { x: 156, z: 130, h: Math.PI / 2 },
-    ];
-    for (const s of spots) this.spawnParked(s.x, s.z, s.h, pick(['sedan', 'coupe', 'sedan', 'taxi']));
-  }
-
-  makeCar(type, colorHex) {
-    const car = new Car(type, colorHex);
-    this.scene.add(car.root);
-    this.setCarShadow(car, false); // traffic uses blob shadows, not the shadow map
-    return car;
-  }
-
-  // Toggle real shadow casting for a car (the player's car casts; traffic
-  // and police ride on their blob shadows to keep the shadow pass cheap).
-  setCarShadow(car, on) {
-    car.root.traverse((o) => {
-      if (!o.isMesh) return;
-      // Transparent parts (glass, blob) never cast: they would throw a solid shadow.
-      if (o.material && o.material.transparent) return;
-      o.castShadow = on;
-    });
-  }
-
-  spawnMoving(px, pz) {
-    const p = randomStreetPoint();
-    // Keep some distance from the player so cars don't pop in on top of them.
-    if (dist2(p.x, p.z, px, pz) < 60 * 60) {
-      p.x += p.x < px ? -70 : 70;
-      p.x = clamp(p.x, -CITY_HALF + 10, CITY_HALF - 10);
+function normRoads(city) {
+  const c = city || {};
+  const raw = c.roads || c.roadSegments || c.segments || c.network || c.roadsList || [];
+  const out = [];
+  if (Array.isArray(raw)) {
+    for (const s of raw) {
+      if (!s) continue;
+      const a = toXZ(s.start || s.a || s.from || s.p0);
+      const b = toXZ(s.end || s.b || s.to || s.p1);
+      if (!a || !b) continue;
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const len = Math.hypot(dx, dz);
+      if (len < 0.01) continue;
+      out.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, dx: dx / len, dz: dz / len, len });
     }
-    const car = this.makeCar(pick(['sedan', 'sedan', 'coupe', 'taxi', 'truck']));
-    car.driver = 'ai';
-    car.setPose(p.x, p.z, headingFor(p.axis, p.dir));
-    car.ai = {
-      axis: p.axis,
-      dir: p.dir,
-      street: p.axis === 'z' ? p.x : p.z,
-      speed: rand(TRAFFIC.speedMin, TRAFFIC.speedMax),
-      targetSpeed: rand(TRAFFIC.speedMin, TRAFFIC.speedMax),
-    };
-    car.speed = car.ai.speed;
-    this.cars.push(car);
-    return car;
   }
+  return out;
+}
 
-  spawnParked(x, z, heading, type = 'sedan', colorHex = null) {
-    const car = this.makeCar(type, colorHex);
-    car.driver = null;
-    car.parked = true;
-    car.setPose(x, z, heading);
-    this.parked.push(car);
-    return car;
+function fallbackGrid() {
+  // A 5x5 grid of two-way streets, used only if the city object carries no
+  // road network at all. Spacing 40, half-size 80.
+  const segs = [];
+  const half = 80;
+  const step = 40;
+  for (let i = -2; i <= 2; i++) {
+    const c = i * step;
+    segs.push({ ax: -half, az: c, bx: half, bz: c, dx: 1, dz: 0, len: half * 2 });
+    segs.push({ ax: half, az: c, bx: -half, bz: c, dx: -1, dz: 0, len: half * 2 });
+    segs.push({ ax: c, az: -half, bx: c, bz: half, dx: 0, dz: 1, len: half * 2 });
+    segs.push({ ax: c, az: half, bx: c, bz: -half, dx: 0, dz: -1, len: half * 2 });
   }
+  return segs;
+}
 
-  nearestCar(x, z, maxDist) {
-    let best = null;
-    let bestD = maxDist * maxDist;
-    for (const car of [...this.cars, ...this.parked]) {
-      if (car.driver === 'player') continue;
-      const d = dist2(x, z, car.x, car.z);
-      if (d < bestD) {
-        bestD = d;
-        best = car;
+const KINDS = ['sedan', 'sedan', 'hatch', 'hatch', 'truck'];
+
+// createTraffic(scene, city, makeCar): returns the traffic system. It
+// exposes cars (the live traffic car entries), count, and update(dt,
+// playerPos, playerCar). Each entry is { group, seg, t, speed,
+// targetSpeed }. playerCar is the player's car group when driving, or null.
+export function createTraffic(scene, city, makeCar) {
+  let roads = normRoads(city);
+  if (roads.length === 0) roads = fallbackGrid();
+  const count = Math.max(1, Math.round(tun(['traffic.count', 'trafficCount', 'traffic.cars'], 12)));
+  const cruiseMin = tun(['traffic.speedMin', 'traffic.cruiseMin'], 7);
+  const cruiseMax = tun(['traffic.speedMax', 'traffic.cruiseMax'], 12);
+  const despawnDist = tun(['traffic.despawnDistance', 'traffic.despawn'], 150);
+  const colours = (CAR_COLOURS && CAR_COLOURS.length) ? CAR_COLOURS : ['silver', 'red', 'blue', 'teal'];
+
+  const traffic = {
+    scene,
+    city,
+    roads,
+    cars: [],
+    count,
+
+    _spawnEntry(nearPos) {
+      let seg;
+      if (nearPos) {
+        // Prefer a segment whose midpoint is near the player.
+        const near = roads.filter((s) => {
+          const mx = (s.ax + s.bx) / 2;
+          const mz = (s.az + s.bz) / 2;
+          return Math.hypot(mx - nearPos.x, mz - nearPos.z) < 70;
+        });
+        seg = near.length ? pick(near) : pick(roads);
+      } else {
+        seg = pick(roads);
       }
-    }
-    return best;
-  }
+      const group = makeCar(pick(colours), pick(KINDS), null);
+      group.position.set(0, 0, 0);
+      scene.add(group);
+      return {
+        group,
+        seg,
+        t: rand(0, seg.len),
+        speed: rand(cruiseMin, cruiseMax),
+        targetSpeed: rand(cruiseMin, cruiseMax),
+      };
+    },
 
-  removeCar(car) {
-    this.scene.remove(car.root);
-    this.cars = this.cars.filter((c) => c !== car);
-    this.parked = this.parked.filter((c) => c !== car);
-  }
+    _place(entry) {
+      const s = entry.seg;
+      entry.group.position.set(s.ax + s.dx * entry.t, 0, s.az + s.dz * entry.t);
+      entry.group.rotation.y = Math.atan2(s.dx, s.dz);
+    },
 
-  clear() {
-    for (const car of [...this.cars, ...this.parked]) this.scene.remove(car.root);
-    this.cars = [];
-    this.parked = [];
-    this.playerCar = null;
-  }
+    _nextSeg(entry) {
+      const end = { x: entry.seg.bx, z: entry.seg.bz };
+      const cands = roads.filter((s) => Math.hypot(s.ax - end.x, s.az - end.z) < 6);
+      if (cands.length) return pick(cands);
+      // Dead end: turn around and drive the same street back.
+      const s = entry.seg;
+      return { ax: s.bx, az: s.bz, bx: s.ax, bz: s.az, dx: -s.dx, dz: -s.dz, len: s.len };
+    },
 
-  // Drive one AI car along the grid: lane offset, intersection turns,
-  // and braking for the car ahead.
-  driveAI(car, dt) {
-    const ai = car.ai;
-    const f = car.forward();
-    // Car ahead? Slow down.
-    let ahead = Infinity;
-    for (const other of this.cars) {
-      if (other === car || other.driver === 'player') continue;
-      const dx = other.x - car.x;
-      const dz = other.z - car.z;
-      const along = dx * f.x + dz * f.z;
-      const side = Math.abs(dx * f.z - dz * f.x);
-      if (along > 0 && along < TRAFFIC.followGap + 6 && side < 2.4) ahead = Math.min(ahead, along);
-    }
-    const wantSpeed = ahead < TRAFFIC.followGap ? 0 : ai.targetSpeed;
-    const throttle = wantSpeed > car.speed ? 0.7 : (wantSpeed < car.speed - 0.5 ? -0.8 : 0);
-    // Desired heading: along the current street, on the right-hand lane.
-    const targetHeading = headingFor(ai.axis, ai.dir);
-    const laneCoord = ai.street + LANE * ai.dir;
-    const across = (ai.axis === 'z' ? car.x : car.z) - laneCoord;
-    // Steer toward the heading, correcting the lane offset.
-    let dh = targetHeading - car.heading;
-    while (dh > Math.PI) dh -= Math.PI * 2;
-    while (dh < -Math.PI) dh += Math.PI * 2;
-    const steer = clamp(dh * 1.4 - across * 0.06, -1, 1);
-    car.update(dt, { throttle, steer, handbrake: false }, this.colliders);
-
-    // At an intersection, maybe turn onto the cross street.
-    const alongCoord = ai.axis === 'z' ? car.z : car.x;
-    const cross = ai.axis === 'z' ? car.x : car.z;
-    const nearest = STREETS.reduce((b, s) => (Math.abs(s - alongCoord) < Math.abs(b - alongCoord) ? s : b), STREETS[0]);
-    if (Math.abs(nearest - alongCoord) < 2.2 && Math.abs(cross - ai.street) < 8) {
-      const roll = Math.random();
-      if (roll < 0.3) {
-        // Turn onto the cross street.
-        const turn = Math.random() < 0.5 ? 1 : -1;
-        ai.axis = ai.axis === 'z' ? 'x' : 'z';
-        ai.street = nearest;
-        ai.dir = turn;
-      } else if (roll < 0.36) {
-        ai.dir *= -1; // rare U-turn
+    update(dt, playerPos, playerCar) {
+      const px = playerPos ? playerPos.x : 0;
+      const pz = playerPos ? playerPos.z : 0;
+      for (const entry of this.cars) {
+        // Stop for the car ahead on the same segment.
+        let target = entry.targetSpeed;
+        for (const other of this.cars) {
+          if (other === entry || other.seg !== entry.seg) continue;
+          const gap = other.t - entry.t;
+          if (gap > 0 && gap < 9) {
+            target = Math.min(target, other.speed);
+            if (gap < 5) target = 0;
+          }
+        }
+        // Stop for the player's car ahead on the same segment.
+        if (playerCar && playerCar.position) {
+          const dx = playerCar.position.x - entry.group.position.x;
+          const dz = playerCar.position.z - entry.group.position.z;
+          const ahead = dx * entry.seg.dx + dz * entry.seg.dz;
+          const side = Math.abs(dx * entry.seg.dz - dz * entry.seg.dx);
+          if (ahead > 0 && ahead < 10 && side < 3) target = 0;
+        }
+        entry.speed += clamp(target - entry.speed, -14 * dt, 8 * dt);
+        if (entry.speed < 0) entry.speed = 0;
+        entry.t += entry.speed * dt;
+        if (entry.t >= entry.seg.len) {
+          entry.seg = this._nextSeg(entry);
+          entry.t = 0;
+        }
+        this._place(entry);
+        // Spin the wheels.
+        const w = entry.group.userData && entry.group.userData.wheels;
+        if (w) {
+          const spin = (entry.speed / (entry.group.userData.wheelRadius || 0.36)) * dt;
+          for (const key of ['frontL', 'frontR', 'rearL', 'rearR']) {
+            const pivot = w[key];
+            if (pivot && pivot.userData.tyre) pivot.userData.tyre.rotation.x += spin;
+          }
+        }
+        // Despawn far away, respawn near the player.
+        const d = Math.hypot(entry.group.position.x - px, entry.group.position.z - pz);
+        if (d > despawnDist) {
+          const fresh = this._spawnEntry({ x: px, z: pz });
+          scene.remove(entry.group);
+          entry.group = fresh.group;
+          entry.seg = fresh.seg;
+          entry.t = fresh.t;
+          entry.speed = fresh.speed;
+          entry.targetSpeed = fresh.targetSpeed;
+          this._place(entry);
+        }
       }
-    }
+    },
+  };
+
+  for (let i = 0; i < count; i++) {
+    const entry = traffic._spawnEntry(null);
+    traffic.cars.push(entry);
+    traffic._place(entry);
+  }
+  // Pre-scatter: start each car at a different point along its street.
+  for (const entry of traffic.cars) {
+    entry.t = randInt(0, Math.floor(entry.seg.len));
+    traffic._place(entry);
   }
 
-  update(dt, playerX, playerZ, vfx) {
-    // Keep the fleet topped up and near the player.
-    for (let i = this.cars.length - 1; i >= 0; i--) {
-      const car = this.cars[i];
-      if (dist2(car.x, car.z, playerX, playerZ) > TRAFFIC.despawnDist * TRAFFIC.despawnDist) {
-        this.removeCar(car);
-        this.spawnMoving(playerX, playerZ);
-      }
-    }
-    while (this.cars.length < TRAFFIC.count) this.spawnMoving(playerX, playerZ);
-
-    for (const car of this.cars) {
-      if (car.driver === 'player') continue;
-      this.driveAI(car, dt);
-      if (car.impact > 0.25 && vfx) {
-        vfx.sparks(car.x, 0.8, car.z);
-      }
-    }
-  }
+  return traffic;
 }

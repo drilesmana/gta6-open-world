@@ -1,119 +1,241 @@
-// Velora Heat — arcade car physics.
-// A bicycle-model car with speed-sensitive steering, handbrake drift and
-// building collision on two circles (front/rear). The same class drives the
-// player's car, traffic and police — only the input source differs.
-import { CAR, CITY_HALF, WATER_START } from './config.js';
-import { makeCar } from './vehicles.js';
-import { clamp, damp, collideCircle } from './util.js';
+import * as THREE from 'three';
+import { CONFIG } from './config.js';
+import { clamp, damp } from './util.js';
 
-let nextId = 1;
+// Arcade driving for Velora Heat. The car keeps a velocity vector separate
+// from its heading, so the handbrake can break lateral grip and the car
+// drifts instead of just turning. Engine force acts along the heading,
+// lateral velocity is killed by grip (weak while handbraking), and off-road
+// ground drags the car down. No building collision data exists in the city
+// object, so the car is clamped to the city bounds and slowed off-road.
 
-export class Car {
-  constructor(type = 'sedan', colorHex = null) {
-    const built = makeCar(type, colorHex);
-    this.root = built.root;
-    this.wheels = built.wheels;
-    this.lightBar = built.lightBar;
-    this.type = type;
-    this.id = nextId++;
-    this.x = 0;
-    this.z = 0;
-    this.heading = 0;
-    this.speed = 0;
-    this.steer = 0;
-    this.driver = null; // 'player' | 'ai' | null (parked)
-    this.health = 100;
-    this.parked = false;
-    this.impact = 0; // 0..1, set on a hard hit for VFX/sound
-    this.smoke = 0; // grows as health drops
-    this._fx = { x: 0, z: 0 };
-    this._rx = { x: 0, z: 0 };
-  }
-
-  get speedKmh() {
-    return Math.abs(this.speed) * 3.6;
-  }
-
-  setPose(x, z, heading) {
-    this.x = x;
-    this.z = z;
-    this.heading = heading;
-    this.syncVisual();
-  }
-
-  forward() {
-    return { x: Math.sin(this.heading), z: Math.cos(this.heading) };
-  }
-
-  // input: { throttle: -1..1, steer: -1..1, handbrake: bool }
-  // Returns the impact strength of any building hit this frame (0 when none).
-  update(dt, input, colliders) {
-    const speed01 = clamp(Math.abs(this.speed) / CAR.maxSpeed, 0, 1);
-    const steerTarget = input.steer * CAR.steerMax * (1 - speed01 * 0.55);
-    this.steer = damp(this.steer, steerTarget, CAR.steerSpeed * 2.2, dt);
-
-    // Longitudinal: throttle, brake, drag, handbrake.
-    if (input.throttle > 0) {
-      this.speed += input.throttle * CAR.accel * (1 - speed01 * 0.75) * dt;
-    } else if (input.throttle < 0) {
-      if (this.speed > 0.5) this.speed += input.throttle * CAR.brake * dt;
-      else this.speed += input.throttle * CAR.accel * 0.6 * dt;
+function tun(keys, fallback) {
+  const c = CONFIG || {};
+  for (const k of keys) {
+    const parts = k.split('.');
+    let v = c;
+    let ok = true;
+    for (const p of parts) {
+      if (v && typeof v === 'object' && p in v) v = v[p];
+      else { ok = false; break; }
     }
-    this.speed -= this.speed * CAR.drag * dt * (input.handbrake ? 2.2 : 1);
-    if (input.handbrake && Math.abs(this.speed) > 1) this.speed -= Math.sign(this.speed) * 9 * dt;
-    this.speed = clamp(this.speed, -CAR.maxReverse, CAR.maxSpeed);
+    if (ok && typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return fallback;
+}
 
-    // Yaw from the bicycle model; grip falls off with the handbrake (drift).
-    const grip = input.handbrake ? CAR.handbrakeGrip : CAR.grip;
-    const yawRate = (this.speed / CAR.wheelBase) * Math.tan(this.steer) * clamp(grip / CAR.grip, 0.25, 1);
-    this.heading += yawRate * dt;
+function toXZ(v) {
+  if (!v) return null;
+  if (Array.isArray(v)) {
+    if (v.length >= 3) return { x: v[0], z: v[2] };
+    if (v.length >= 2) return { x: v[0], z: v[1] };
+    return null;
+  }
+  if (typeof v === 'object' && typeof v.x === 'number' && typeof v.z === 'number') {
+    return { x: v.x, z: v.z };
+  }
+  return null;
+}
 
-    const f = this.forward();
-    this.x += f.x * this.speed * dt;
-    this.z += f.z * this.speed * dt;
+function normRoads(city) {
+  const c = city || {};
+  const raw = c.roads || c.roadSegments || c.segments || c.network || c.roadsList || [];
+  const out = [];
+  if (Array.isArray(raw)) {
+    for (const s of raw) {
+      if (!s) continue;
+      const a = toXZ(s.start || s.a || s.from || s.p0);
+      const b = toXZ(s.end || s.b || s.to || s.p1);
+      if (!a || !b) continue;
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const len = Math.hypot(dx, dz);
+      if (len < 0.01) continue;
+      out.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, dx: dx / len, dz: dz / len, len });
+    }
+  }
+  return out;
+}
 
-    // City bounds: walls of the world, sand is drivable, water is not.
-    this.x = clamp(this.x, -CITY_HALF, CITY_HALF);
-    this.z = clamp(this.z, -CITY_HALF, WATER_START - 2);
+function distToSegment(px, pz, s) {
+  const vx = s.bx - s.ax;
+  const vz = s.bz - s.az;
+  const wx = px - s.ax;
+  const wz = pz - s.az;
+  const t = clamp((wx * vx + wz * vz) / (s.len * s.len), 0, 1);
+  const cx = s.ax + vx * t;
+  const cz = s.az + vz * t;
+  return Math.hypot(px - cx, pz - cz);
+}
 
-    // Building collision on two circles; a hard hit bounces and sparks.
-    this.impact = 0;
-    const fx = this.x + f.x * 1.6;
-    const fz = this.z + f.z * 1.6;
-    const rx = this.x - f.x * 1.6;
-    const rz = this.z - f.z * 1.6;
-    this._fx.x = fx; this._fx.z = fz;
-    this._rx.x = rx; this._rx.z = rz;
-    const beforeSpeed = this.speed;
-    if (collideCircle(this._fx, 1.05, colliders) || collideCircle(this._rx, 1.05, colliders)) {
-      // Rebuild position from the corrected circles.
-      this.x = (this._fx.x + this._rx.x) / 2;
-      this.z = (this._fx.z + this._rx.z) / 2;
-      if (Math.abs(beforeSpeed) > 6) {
-        this.impact = clamp(Math.abs(beforeSpeed) / CAR.maxSpeed, 0.2, 1);
-        this.speed *= -0.28;
-        this.health -= this.impact * 14;
-      } else {
-        this.speed *= 0.55;
+// findNearestCar(position, cars, maxDist): the car group closest to the
+// position within maxDist metres, or null. main.js uses it for the "press E
+// to steal" prompt. cars is any array of objects with a .position.
+export function findNearestCar(position, cars, maxDist = 4) {
+  let best = null;
+  let bestD = maxDist;
+  for (const car of cars || []) {
+    if (!car || !car.position) continue;
+    const d = Math.hypot(car.position.x - position.x, car.position.z - position.z);
+    if (d < bestD) {
+      bestD = d;
+      best = car;
+    }
+  }
+  return best;
+}
+
+// createDriving(player, city): returns the driving controller. It reads the
+// player object (for enter/exit state) and the city object (for roads and
+// bounds). Exposes car, speed (signed m/s along the heading), steering,
+// update(dt, camera, input) and enterCar/exitCar. input is
+// { forward, back, left, right, handbrake }.
+export function createDriving(player, city) {
+  const roads = normRoads(city);
+  const roadHalf = tun(['city.roadWidth', 'roadWidth', 'city.road_width'], 9) / 2;
+  const halfSize = tun(['city.halfSize', 'city.half', 'cityHalfSize'], null)
+    ?? tun(['city.size', 'citySize', 'city.width'], 240) / 2;
+  const topSpeed = tun(['car.topSpeed', 'car.top', 'topSpeed', 'speeds.carTop'], 38);
+  const accel = tun(['car.acceleration', 'car.accel', 'acceleration', 'speeds.carAccel'], 16);
+  const brakeDecel = tun(['car.brake', 'car.brakeDecel', 'brakeDecel'], 26);
+  const reverseTop = tun(['car.reverseSpeed', 'car.reverse', 'reverseSpeed'], 9);
+
+  const driving = {
+    player,
+    city,
+    roads,
+    car: null,
+    speed: 0,
+    steering: 0,
+    vel: new THREE.Vector3(),
+    _fwd: new THREE.Vector3(),
+    _rgt: new THREE.Vector3(),
+    _camTarget: new THREE.Vector3(),
+    _camLook: new THREE.Vector3(),
+
+    enterCar(car) {
+      if (!car) return;
+      this.car = car;
+      this.vel.set(0, 0, 0);
+      this.speed = 0;
+      this.steering = 0;
+      player.enterCar(car);
+    },
+
+    exitCar() {
+      if (!this.car) return;
+      this.car = null;
+      this.vel.set(0, 0, 0);
+      this.speed = 0;
+      this.steering = 0;
+      player.exitCar();
+    },
+
+    update(dt, camera, input) {
+      const car = this.car;
+      if (!car || !player.driving) return;
+      const inp = input || {};
+      const wheelbase = 2.6;
+
+      // Steering: left is positive (heading grows, counter-clockwise from above).
+      const steerIn = (inp.left ? 1 : 0) - (inp.right ? 1 : 0);
+      const maxSteer = 0.55;
+      this.steering = damp(this.steering, steerIn * maxSteer, 8, dt);
+
+      const heading = car.rotation.y;
+      this._fwd.set(Math.sin(heading), 0, Math.cos(heading));
+      this._rgt.set(Math.cos(heading), 0, -Math.sin(heading));
+      let vF = this.vel.dot(this._fwd);
+      let vR = this.vel.dot(this._rgt);
+
+      // Engine / brake / reverse.
+      if (inp.forward) vF += accel * dt;
+      if (inp.back) {
+        if (vF > 0.5) vF -= brakeDecel * dt;
+        else vF -= accel * 0.55 * dt;
       }
-    }
+      // Handbrake: hard decel plus a drift window (grip collapses).
+      const handbrake = !!inp.handbrake;
+      if (handbrake) {
+        vF -= Math.sign(vF) * Math.min(Math.abs(vF), brakeDecel * dt);
+        vF *= Math.max(0, 1 - 0.4 * dt);
+      }
+      // Drag + rolling resistance.
+      vF -= vF * 0.55 * dt;
+      vF = clamp(vF, -reverseTop, topSpeed);
+      // Off-road: extra drag when far from any road centre line.
+      let offroad = roads.length === 0;
+      if (!offroad) {
+        let best = Infinity;
+        for (const s of roads) {
+          const d = distToSegment(car.position.x, car.position.z, s);
+          if (d < best) best = d;
+          if (best <= roadHalf + 2) break;
+        }
+        offroad = best > roadHalf + 2;
+      }
+      if (offroad) vF *= Math.max(0, 1 - 1.4 * dt);
+      // Lateral grip: kills sideways slide fast, slowly while handbraking.
+      const grip = handbrake ? 1.4 : 9;
+      vR *= Math.exp(-grip * dt);
 
-    // Smoke when battered.
-    this.smoke = clamp((100 - this.health) / 60, 0, 1);
-    this.syncVisual(dt);
-    return this.impact;
-  }
+      this.vel.copy(this._fwd).multiplyScalar(vF).addScaledVector(this._rgt, vR);
+      car.position.x += this.vel.x * dt;
+      car.position.z += this.vel.z * dt;
 
-  syncVisual(dt = 0) {
-    this.root.position.set(this.x, 0, this.z);
-    this.root.rotation.y = this.heading;
-    // Wheel spin is scaled by dt so it stays frame-rate independent;
-    // setPose calls this with no dt and spins nothing.
-    const spin = this.speed * 0.09 * Math.min(dt * 60, 2);
-    for (const w of this.wheels) {
-      if (w.userData.front) w.rotation.y = this.steer;
-      const tire = w.children[0];
-      if (tire) tire.rotation.x += spin;
-    }
-  }
+      // Heading follows steering, scaled by forward speed; handbrake lets
+      // the nose swing further so the drift reads.
+      const turn = this.steering * (vF / wheelbase) * (handbrake ? 1.7 : 1.0);
+      car.rotation.y += turn * dt;
+      this.speed = vF;
+
+      // City bounds: clamp and kill outward velocity.
+      if (Math.abs(car.position.x) > halfSize) {
+        car.position.x = Math.sign(car.position.x) * halfSize;
+        if (Math.sign(this.vel.x) === Math.sign(car.position.x)) this.vel.x = 0;
+      }
+      if (Math.abs(car.position.z) > halfSize) {
+        car.position.z = Math.sign(car.position.z) * halfSize;
+        if (Math.sign(this.vel.z) === Math.sign(car.position.z)) this.vel.z = 0;
+      }
+
+      // Wheels: spin with speed, fronts steer. Body leans into turns.
+      const w = car.userData && car.userData.wheels;
+      if (w) {
+        const spin = (vF / (car.userData.wheelRadius || 0.36)) * dt;
+        for (const key of ['frontL', 'frontR', 'rearL', 'rearR']) {
+          const pivot = w[key];
+          if (!pivot) continue;
+          if (pivot.userData.tyre) pivot.userData.tyre.rotation.x += spin;
+        }
+        if (w.frontL) w.frontL.rotation.y = this.steering;
+        if (w.frontR) w.frontR.rotation.y = this.steering;
+      }
+      if (car.userData && car.userData.body) {
+        car.userData.body.rotation.z = damp(
+          car.userData.body.rotation.z,
+          -this.steering * clamp(Math.abs(vF) / topSpeed, 0, 1) * 0.09,
+          8,
+          dt,
+        );
+      }
+
+      // Chase camera: behind the car, a touch higher and further back at speed.
+      const back = 7 + clamp(Math.abs(vF) / topSpeed, 0, 1) * 2.5;
+      this._camTarget.set(
+        car.position.x - this._fwd.x * back,
+        car.position.y + 3.2,
+        car.position.z - this._fwd.z * back,
+      );
+      camera.position.lerp(this._camTarget, Math.min(1, 6 * dt));
+      this._camLook.set(
+        car.position.x + this._fwd.x * 5,
+        car.position.y + 1.2,
+        car.position.z + this._fwd.z * 5,
+      );
+      camera.lookAt(this._camLook);
+    },
+  };
+
+  return driving;
 }

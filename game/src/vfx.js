@@ -1,145 +1,162 @@
-// Velora Heat — event-driven VFX, pooled and cheap (technical-art.md).
-// One Points cloud for sparks/dust (a single draw call), one pool of fading
-// skid-mark planes, and one pool of expanding impact rings. Nothing allocates
-// per frame except the pooled buffers' updates.
-import { rand } from './util.js';
+import * as THREE from 'three';
 
-const MAX_PARTICLES = 420;
+// Particle effects for Velora Heat: tyre smoke, sparks and a small muzzle
+// flash. One pool of sprites is reused so nothing is allocated per frame.
+// The soft round sprite texture is a DataTexture computed in code, so the
+// module loads in Node (no canvas, no DOM) as well as in the browser.
 
-export class Vfx {
-  constructor(scene) {
-    this.scene = scene;
-    // Particle pool: positions + velocities + life, rendered as Points.
-    this.pos = new Float32Array(MAX_PARTICLES * 3);
-    this.col = new Float32Array(MAX_PARTICLES * 3);
-    this.vel = new Float32Array(MAX_PARTICLES * 3);
-    this.life = new Float32Array(MAX_PARTICLES);
-    this.maxLife = new Float32Array(MAX_PARTICLES);
-    this.grav = new Float32Array(MAX_PARTICLES);
-    this.head = 0;
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(this.col, 3));
-    const mat = new THREE.PointsMaterial({
-      size: 0.35, vertexColors: true, transparent: true, opacity: 0.95,
-      depthWrite: false, sizeAttenuation: true,
+const POOL = 90;
+
+function softTexture() {
+  const size = 32;
+  const data = new Uint8Array(size * size * 4);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = (x + 0.5) / size - 0.5;
+      const dy = (y + 0.5) / size - 0.5;
+      const r = Math.hypot(dx, dy) * 2;
+      const a = Math.max(0, 1 - r);
+      const i = (y * size + x) * 4;
+      data[i] = 255;
+      data[i + 1] = 255;
+      data[i + 2] = 255;
+      data[i + 3] = Math.round(a * a * 255);
+    }
+  }
+  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// createVfx(scene): returns the effects object with spawn functions
+// smoke(pos, count), sparks(pos, count), flash(pos), an update(dt) that
+// fades particles out, and alive (how many particles are currently lit).
+export function createVfx(scene) {
+  const tex = softTexture();
+  const pool = [];
+  for (let i = 0; i < POOL; i++) {
+    const material = new THREE.SpriteMaterial({
+      map: tex,
+      transparent: true,
+      depthWrite: false,
+      opacity: 0,
+      color: 0xffffff,
     });
-    this.points = new THREE.Points(geo, mat);
-    this.points.frustumCulled = false;
-    scene.add(this.points);
-    for (let i = 0; i < MAX_PARTICLES; i++) this.pos[i * 3 + 1] = -100;
-
-    // Skid marks: fading dark planes, pooled.
-    this.skids = [];
-    const skidGeo = new THREE.PlaneGeometry(0.35, 1.6);
-    for (let i = 0; i < 48; i++) {
-      const m = new THREE.Mesh(skidGeo, new THREE.MeshBasicMaterial({
-        color: 0x141210, transparent: true, opacity: 0, depthWrite: false,
-      }));
-      m.rotation.x = -Math.PI / 2;
-      m.visible = false;
-      scene.add(m);
-      this.skids.push({ mesh: m, life: 0 });
-    }
-    this.skidHead = 0;
-
-    // Impact rings: expanding flat rings, pooled.
-    this.rings = [];
-    const ringGeo = new THREE.RingGeometry(0.4, 0.55, 24);
-    for (let i = 0; i < 10; i++) {
-      const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({
-        color: 0xffc46b, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide,
-      }));
-      m.rotation.x = -Math.PI / 2;
-      m.visible = false;
-      scene.add(m);
-      this.rings.push({ mesh: m, life: 0, max: 1 });
-    }
-    this.ringHead = 0;
+    const sprite = new THREE.Sprite(material);
+    sprite.visible = false;
+    sprite.scale.set(1, 1, 1);
+    scene.add(sprite);
+    pool.push({
+      sprite,
+      material,
+      vel: new THREE.Vector3(),
+      life: 0,
+      maxLife: 1,
+      size0: 1,
+      size1: 1,
+      grav: 0,
+      active: false,
+    });
   }
 
-  spawn(x, y, z, n, color, speed = 4, up = 3, life = 0.7, gravity = 6) {
-    const c = new THREE.Color(color);
-    for (let k = 0; k < n; k++) {
-      const i = this.head;
-      this.head = (this.head + 1) % MAX_PARTICLES;
-      this.pos[i * 3] = x;
-      this.pos[i * 3 + 1] = y;
-      this.pos[i * 3 + 2] = z;
-      const a = Math.random() * Math.PI * 2;
-      const s = speed * (0.4 + Math.random() * 0.8);
-      this.vel[i * 3] = Math.cos(a) * s;
-      this.vel[i * 3 + 1] = up * (0.4 + Math.random() * 0.9);
-      this.vel[i * 3 + 2] = Math.sin(a) * s;
-      this.col[i * 3] = c.r;
-      this.col[i * 3 + 1] = c.g;
-      this.col[i * 3 + 2] = c.b;
-      this.life[i] = this.maxLife[i] = life * (0.6 + Math.random() * 0.7);
-      this.grav[i] = gravity;
-    }
-  }
-
-  sparks(x, y, z) { this.spawn(x, y, z, 18, 0xffc46b, 6, 4, 0.5, 9); }
-  dust(x, y, z, n = 6) { this.spawn(x, y, z, n, 0xcbb894, 1.6, 1.2, 0.9, -0.5); }
-  cashBurst(x, y, z) {
-    this.spawn(x, y, z, 26, 0x8fce6a, 4, 5, 0.9, 7);
-    // A gold ring under the burst so the payout reads as a celebration, not just sparks.
-    this.ring(x, 0.15, z, 0x8fce6a, 0.8);
-  }
-  smoke(x, y, z, n = 10) { this.spawn(x, y, z, n, 0x555550, 1.2, 2.2, 1.4, -1); }
-
-  skid(x, y, z, yaw) {
-    const s = this.skids[this.skidHead];
-    this.skidHead = (this.skidHead + 1) % this.skids.length;
-    s.mesh.position.set(x, y, z);
-    s.mesh.rotation.z = -yaw;
-    s.mesh.visible = true;
-    s.mesh.material.opacity = 0.55;
-    s.life = 4;
-  }
-
-  ring(x, y, z, color = 0xffc46b, max = 1) {
-    const r = this.rings[this.ringHead];
-    this.ringHead = (this.ringHead + 1) % this.rings.length;
-    r.mesh.position.set(x, y, z);
-    r.mesh.material.color.setHex(color);
-    r.mesh.visible = true;
-    r.life = r.max = max;
-  }
-
-  update(dt) {
-    for (let i = 0; i < MAX_PARTICLES; i++) {
-      if (this.life[i] <= 0) continue;
-      this.life[i] -= dt;
-      if (this.life[i] <= 0) {
-        this.pos[i * 3 + 1] = -100;
-        continue;
-      }
-      this.vel[i * 3 + 1] -= this.grav[i] * dt;
-      this.pos[i * 3] += this.vel[i * 3] * dt;
-      this.pos[i * 3 + 1] += this.vel[i * 3 + 1] * dt;
-      this.pos[i * 3 + 2] += this.vel[i * 3 + 2] * dt;
-      if (this.pos[i * 3 + 1] < 0.05) {
-        this.pos[i * 3 + 1] = 0.05;
-        this.vel[i * 3 + 1] *= -0.3;
+  function spawn(pos, opts) {
+    let p = null;
+    for (const cand of pool) {
+      if (!cand.active) {
+        p = cand;
+        break;
       }
     }
-    this.points.geometry.attributes.position.needsUpdate = true;
-    this.points.geometry.attributes.color.needsUpdate = true;
-    for (const s of this.skids) {
-      if (!s.mesh.visible) continue;
-      s.life -= dt;
-      s.mesh.material.opacity = Math.max(0, s.life / 4) * 0.55;
-      if (s.life <= 0) s.mesh.visible = false;
-    }
-    for (const r of this.rings) {
-      if (!r.mesh.visible) continue;
-      r.life -= dt;
-      const p = 1 - Math.max(0, r.life) / r.max;
-      const sc = 1 + p * 7;
-      r.mesh.scale.set(sc, sc, sc);
-      r.mesh.material.opacity = (1 - p) * 0.8;
-      if (r.life <= 0) r.mesh.visible = false;
-    }
+    if (!p) return;
+    p.active = true;
+    p.sprite.visible = true;
+    p.sprite.position.set(pos.x, pos.y, pos.z);
+    p.vel.set(
+      (Math.random() - 0.5) * (opts.spread || 1),
+      (opts.up || 0) + (Math.random() - 0.5) * (opts.spread || 1) * 0.6,
+      (Math.random() - 0.5) * (opts.spread || 1),
+    );
+    p.life = opts.life;
+    p.maxLife = opts.life;
+    p.size0 = opts.size0;
+    p.size1 = opts.size1;
+    p.grav = opts.grav || 0;
+    p.material.color.setHex(opts.color);
+    p.material.opacity = opts.opacity ?? 0.85;
+    p.sprite.scale.set(opts.size0, opts.size0, 1);
   }
+
+  const vfx = {
+    pool,
+    alive: 0,
+
+    smoke(pos, count = 6) {
+      for (let i = 0; i < count; i++) {
+        spawn(pos, {
+          color: 0x9a9a9a,
+          life: 0.7 + Math.random() * 0.4,
+          size0: 0.5,
+          size1: 1.7,
+          spread: 0.8,
+          up: 1.1,
+          grav: 0.6,
+          opacity: 0.5,
+        });
+      }
+    },
+
+    sparks(pos, count = 10) {
+      for (let i = 0; i < count; i++) {
+        spawn(pos, {
+          color: Math.random() < 0.5 ? 0xffb020 : 0xff7a1a,
+          life: 0.25 + Math.random() * 0.25,
+          size0: 0.22,
+          size1: 0.1,
+          spread: 6,
+          up: 2.5,
+          grav: -9,
+          opacity: 0.95,
+        });
+      }
+    },
+
+    flash(pos) {
+      spawn(pos, {
+        color: 0xfff3b0,
+        life: 0.16,
+        size0: 0.6,
+        size1: 2.4,
+        spread: 0.2,
+        up: 0,
+        grav: 0,
+        opacity: 1,
+      });
+    },
+
+    update(dt) {
+      let alive = 0;
+      for (const p of pool) {
+        if (!p.active) continue;
+        alive++;
+        p.life -= dt;
+        if (p.life <= 0) {
+          p.active = false;
+          p.sprite.visible = false;
+          p.material.opacity = 0;
+          continue;
+        }
+        p.vel.y += p.grav * dt;
+        p.sprite.position.x += p.vel.x * dt;
+        p.sprite.position.y += p.vel.y * dt;
+        p.sprite.position.z += p.vel.z * dt;
+        const t = 1 - p.life / p.maxLife;
+        const size = p.size0 + (p.size1 - p.size0) * t;
+        p.sprite.scale.set(size, size, 1);
+        p.material.opacity = (p.life / p.maxLife) * 0.85;
+      }
+      this.alive = alive;
+    },
+  };
+
+  return vfx;
 }

@@ -1,146 +1,142 @@
-// Velora Heat — the player on foot.
-// WASD moves relative to the camera, Shift sprints, mouse click (or J) punches.
-// The character rig swings its limbs while walking and snaps its arm out on a
-// punch. Combat is a short-range arc check: peds in front of the player take
-// the hit, get knocked back and flee — and anyone who sees it tells the law.
-import { PLAYER, CITY_HALF, WATER_START } from './config.js';
-import { makePerson } from './characters.js';
-import { clamp, damp, collideCircle } from './util.js';
+import * as THREE from 'three';
+import { CONFIG } from './config.js';
+import { clamp, damp } from './util.js';
+import { makePerson, swingWalk } from './characters.js';
 
-export class Player {
-  constructor(scene) {
-    this.rig = makePerson({ player: true });
-    scene.add(this.rig.root);
-    this.x = 0;
-    this.z = 0;
-    this.heading = 0; // facing, radians
-    this.vx = 0;
-    this.vz = 0;
-    this.health = PLAYER.health;
-    this.vehicle = null; // Car when driving, else null
-    this.punchTimer = 0;
-    this.punchCooldown = 0;
-    this.combo = 0;
-    this.comboTimer = 0;
-    this.onGround = true;
-    this.hurtFlash = 0;
-  }
+// Dario on foot. The player owns a person mesh, a heading, a speed, and a
+// third-person orbit camera. Movement is camera-relative (WASD moves against
+// the camera yaw); the camera orbits with pointer deltas handed in through
+// the input object. Entering a car hides the person and hands control to the
+// driving controller; exiting puts the person back beside the car.
 
-  setPosition(x, z, heading = 0) {
-    this.x = x;
-    this.z = z;
-    this.heading = heading;
-    this.vx = 0;
-    this.vz = 0;
-    this.syncVisual();
-  }
-
-  // input: { f, b, l, r, run, punch, camYaw } — camYaw steers movement.
-  // peds: pedestrian manager (for punch hits). onCrime(amount, reason) callback.
-  update(dt, input, colliders, peds, onCrime) {
-    if (this.vehicle) return; // driving is the car's job
-    this.punchCooldown = Math.max(0, this.punchCooldown - dt);
-    this.comboTimer = Math.max(0, this.comboTimer - dt);
-    if (this.comboTimer <= 0) this.combo = 0;
-    this.hurtFlash = Math.max(0, this.hurtFlash - dt);
-
-    // Movement relative to the camera yaw.
-    const sin = Math.sin(input.camYaw);
-    const cos = Math.cos(input.camYaw);
-    let mx = 0;
-    let mz = 0;
-    if (input.f) { mx += sin; mz += cos; }
-    if (input.b) { mx -= sin; mz -= cos; }
-    if (input.l) { mx -= cos; mz += sin; }
-    if (input.r) { mx += cos; mz -= sin; }
-    const len = Math.hypot(mx, mz);
-    const target = input.run ? PLAYER.runSpeed : PLAYER.walkSpeed;
-    if (len > 0) {
-      mx /= len;
-      mz /= len;
-      this.vx = damp(this.vx, mx * target, 12, dt);
-      this.vz = damp(this.vz, mz * target, 12, dt);
-      const want = Math.atan2(mx, mz);
-      let d = want - this.heading;
-      while (d > Math.PI) d -= Math.PI * 2;
-      while (d < -Math.PI) d += Math.PI * 2;
-      this.heading += clamp(d, -9 * dt, 9 * dt);
-    } else {
-      this.vx = damp(this.vx, 0, 14, dt);
-      this.vz = damp(this.vz, 0, 14, dt);
+function tun(keys, fallback) {
+  const c = CONFIG || {};
+  for (const k of keys) {
+    const parts = k.split('.');
+    let v = c;
+    let ok = true;
+    for (const p of parts) {
+      if (v && typeof v === 'object' && p in v) v = v[p];
+      else { ok = false; break; }
     }
-    this.x += this.vx * dt;
-    this.z += this.vz * dt;
-    this.x = clamp(this.x, -CITY_HALF, CITY_HALF);
-    this.z = clamp(this.z, -CITY_HALF, WATER_START - 1);
-    const pos = { x: this.x, z: this.z };
-    collideCircle(pos, PLAYER.radius, colliders);
-    this.x = pos.x;
-    this.z = pos.z;
+    if (ok && typeof v === 'number' && Number.isFinite(v)) return v;
+  }
+  return fallback;
+}
 
-    // Punch.
-    if (input.punch && this.punchCooldown <= 0) this.startPunch();
-    if (this.punchTimer > 0) {
-      this.punchTimer -= dt;
-      const p = 1 - this.punchTimer / 0.32;
-      this.rig.punch(p);
-      if (!this.punchHitDone && p > 0.3) {
-        this.punchHitDone = true;
-        this.resolvePunch(peds, onCrime);
+function angleDamp(current, target, rate, dt) {
+  // Shortest-arc damping for headings so the player never spins the long way.
+  let d = target - current;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return current + d * Math.min(1, rate * dt);
+}
+
+// createPlayer(scene, materials): returns the player object. It exposes
+// position (a THREE.Vector3, the same object as the mesh position), driving
+// (bool), currentCar, speed, heading, and update(dt, camera, input).
+// input is { forward, back, left, right, run, lookDX, lookDY }.
+export function createPlayer(scene, materials) {
+  const group = makePerson('dario', materials);
+  scene.add(group);
+
+  const walkSpeed = tun(['player.walkSpeed', 'player.walk', 'walkSpeed', 'speeds.walk'], 4.2);
+  const runSpeed = tun(['player.runSpeed', 'player.run', 'runSpeed', 'speeds.run'], 7.4);
+  const camDist = tun(['camera.distance', 'camera.dist', 'cameraDistance'], 7.5);
+
+  const player = {
+    group,
+    position: group.position,
+    heading: 0,
+    speed: 0,
+    driving: false,
+    currentCar: null,
+    camYaw: 0,
+    camPitch: 0.32,
+    camDist,
+    walkSpeed,
+    runSpeed,
+    walkPhase: 0,
+    _camPos: new THREE.Vector3(),
+    _look: new THREE.Vector3(),
+
+    update(dt, camera, input) {
+      const inp = input || {};
+      if (this.driving) {
+        // Riding: stay glued to the car; the driving controller owns motion
+        // and the camera while driving.
+        if (this.currentCar) {
+          this.position.copy(this.currentCar.position);
+          this.heading = this.currentCar.rotation.y;
+        }
+        return;
       }
-    } else {
-      this.rig.resetPunch();
-    }
+      // Orbit the camera with pointer deltas.
+      this.camYaw -= (inp.lookDX || 0) * 0.0032;
+      this.camPitch = clamp(this.camPitch + (inp.lookDY || 0) * 0.0022, -0.15, 0.9);
 
-    // Walk / idle animation.
-    const speed01 = clamp(Math.hypot(this.vx, this.vz) / PLAYER.runSpeed, 0, 1);
-    if (speed01 > 0.05) this.rig.walk(dt, speed01);
-    else this.rig.idle(dt, performance.now() / 1000);
-    this.syncVisual();
-  }
+      // Camera-relative move direction.
+      const f = (inp.forward ? 1 : 0) - (inp.back ? 1 : 0);
+      const s = (inp.right ? 1 : 0) - (inp.left ? 1 : 0);
+      const sin = Math.sin(this.camYaw);
+      const cos = Math.cos(this.camYaw);
+      let mx = 0;
+      let mz = 0;
+      if (f !== 0 || s !== 0) {
+        // Forward on screen is -Z rotated by camYaw; right is +X rotated.
+        mx = -sin * f + cos * s;
+        mz = -cos * f - sin * s;
+        const len = Math.hypot(mx, mz);
+        mx /= len;
+        mz /= len;
+      }
+      const target = (f !== 0 || s !== 0) ? (inp.run ? this.runSpeed : this.walkSpeed) : 0;
+      this.speed = damp(this.speed, target, 10, dt);
+      if (this.speed > 0.05) {
+        this.position.x += mx * this.speed * dt;
+        this.position.z += mz * this.speed * dt;
+        const wantHeading = Math.atan2(mx, mz);
+        this.heading = angleDamp(this.heading, wantHeading, 12, dt);
+        this.walkPhase += this.speed * dt * 1.6;
+      }
+      group.rotation.y = this.heading;
+      swingWalk(group, this.walkPhase, this.speed > 0.1 ? 0.55 : 0);
 
-  startPunch() {
-    this.punchTimer = 0.32;
-    this.punchCooldown = PLAYER.punchCooldown;
-    this.punchHitDone = false;
-    this.combo = this.comboTimer > 0 ? this.combo + 1 : 1;
-    this.comboTimer = PLAYER.comboWindow;
-  }
+      // Third-person camera: behind and above, looking at the head.
+      const cx = this.position.x + Math.sin(this.camYaw) * Math.cos(this.camPitch) * this.camDist;
+      const cz = this.position.z + Math.cos(this.camYaw) * Math.cos(this.camPitch) * this.camDist;
+      const cy = this.position.y + 1.6 + Math.sin(this.camPitch) * this.camDist;
+      this._camPos.set(cx, cy, cz);
+      camera.position.lerp(this._camPos, Math.min(1, 14 * dt));
+      this._look.set(this.position.x, this.position.y + 1.4, this.position.z);
+      camera.lookAt(this._look);
+    },
 
-  resolvePunch(peds, onCrime) {
-    if (!peds) return;
-    const fx = Math.sin(this.heading);
-    const fz = Math.cos(this.heading);
-    // A combo punch lands harder: each chained hit adds 25% knockback.
-    const power = 1 + 0.25 * Math.max(0, this.combo - 1);
-    let hitAny = false;
-    for (const ped of peds.list) {
-      if (ped.fleeing > 2) continue;
-      const dx = ped.x - this.x;
-      const dz = ped.z - this.z;
-      const d = Math.hypot(dx, dz);
-      if (d > PLAYER.punchRange + 0.4) continue;
-      const dot = (dx * fx + dz * fz) / (d || 1);
-      if (dot < Math.cos(PLAYER.punchArc)) continue;
-      // Connect: knockback + flee + a little damage.
-      ped.knock((dx / (d || 1)) * power, (dz / (d || 1)) * power);
-      ped.flee(4);
-      hitAny = true;
-    }
-    if (hitAny && onCrime) onCrime(8, 'assault');
-  }
+    enterCar(car) {
+      this.driving = true;
+      this.currentCar = car || null;
+      group.visible = false;
+      if (car) this.position.copy(car.position);
+    },
 
-  damage(amount) {
-    this.health = Math.max(0, this.health - amount);
-    this.hurtFlash = 0.5;
-  }
+    exitCar() {
+      const car = this.currentCar;
+      if (car) {
+        // Step out to the driver's side (car's left, -X in local space).
+        const side = new THREE.Vector3(-1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), car.rotation.y);
+        this.position.set(
+          car.position.x + side.x * 1.6,
+          car.position.y,
+          car.position.z + side.z * 1.6,
+        );
+        this.heading = car.rotation.y;
+        group.rotation.y = this.heading;
+      }
+      this.driving = false;
+      this.currentCar = null;
+      group.visible = true;
+    },
+  };
 
-  heal(amount) {
-    this.health = Math.min(PLAYER.health, this.health + amount);
-  }
-
-  syncVisual() {
-    this.rig.root.position.set(this.x, 0, this.z);
-    this.rig.root.rotation.y = this.heading;
-  }
+  return player;
 }

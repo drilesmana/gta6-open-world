@@ -1,73 +1,98 @@
-// Velora Heat — sky dome, sun and clouds.
-// A gradient sky dome (cookbook recipe) is cheaper than a cubemap and reads
-// golden-hour by construction: warm horizon, dusky blue top, sun disc + halo.
-// Authored in display space; ACES tone mapping brightens it slightly.
-import { PALETTE } from './config.js';
+// Velora Heat — the sky: a gradient dome, a low golden sun disc, and a few
+// slow clouds drifting over the bay. Pure backdrop, no gameplay logic.
 
+import * as THREE from 'three';
+import { CONFIG } from './config.js';
+import { rand, randInt } from './util.js';
+
+// Build a vertical gradient texture on a canvas: warm cream at the horizon
+// rising into soft blue at the top.
+function makeSkyTexture() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 4;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0.0, '#7fb2e8');
+  grad.addColorStop(0.45, '#a8c8e8');
+  grad.addColorStop(0.72, '#ffd9a3');
+  grad.addColorStop(1.0, '#ffcf8e');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 4, 256);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// Add the sky to the scene. Returns an object with an update function that
+// advances the clouds; call it every frame with the delta time in seconds.
 export function createSky(scene) {
-  const uniforms = {
-    uTop: { value: new THREE.Color(PALETTE.skyTop) },
-    uMid: { value: new THREE.Color(PALETTE.skyMid) },
-    uHorizon: { value: new THREE.Color(PALETTE.skyHorizon) },
-    uSunColor: { value: new THREE.Color(PALETTE.sun) },
-    // Low western sun, matching the directional light.
-    uSunDir: { value: new THREE.Vector3(-0.55, 0.24, 0.42).normalize() },
-  };
-  const sky = new THREE.Mesh(
-    new THREE.SphereGeometry(900, 32, 16),
-    new THREE.ShaderMaterial({
+  const p = CONFIG.palette;
+
+  // Dome: a huge sphere seen from the inside, gradient texture, no lighting.
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(760, 24, 16),
+    new THREE.MeshBasicMaterial({
+      map: makeSkyTexture(),
       side: THREE.BackSide,
-      depthWrite: false,
       fog: false,
-      uniforms,
-      vertexShader: `
-        varying vec3 vDir;
-        void main() {
-          vDir = normalize(position);
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }`,
-      fragmentShader: `
-        varying vec3 vDir;
-        uniform vec3 uTop, uMid, uHorizon, uSunColor, uSunDir;
-        void main() {
-          float h = clamp(vDir.y * 0.5 + 0.5, 0.0, 1.0);
-          vec3 col = mix(uHorizon, uMid, smoothstep(0.45, 0.72, h));
-          col = mix(col, uTop, smoothstep(0.7, 1.0, h));
-          float d = clamp(dot(normalize(vDir), normalize(uSunDir)), 0.0, 1.0);
-          col += uSunColor * (pow(d, 900.0) * 1.4 + pow(d, 10.0) * 0.32 + pow(d, 2.0) * 0.1);
-          gl_FragColor = vec4(col, 1.0);
-        }`,
     }),
   );
-  sky.frustumCulled = false;
-  sky.renderOrder = -10;
-  scene.add(sky);
+  dome.position.y = 0;
+  scene.add(dome);
 
-  // A few soft clouds: flattened white blobs drifting slowly, far above the city.
-  // Two extra puffs over the marina and the north end so the sky reads
-  // full from the beach and the rooftops alike.
-  const cloudMat = new THREE.MeshStandardMaterial({
-    color: 0xffe8d0, roughness: 1, transparent: true, opacity: 0.85,
-    emissive: 0xff9a5e, emissiveIntensity: 0.25,
+  // Low sun disc in the direction of the key light, warm and unlit.
+  const sunDisc = new THREE.Mesh(
+    new THREE.CircleGeometry(34, 32),
+    new THREE.MeshBasicMaterial({ color: 0xfff0c0, fog: false }),
+  );
+  sunDisc.position.set(420, 190, 260);
+  sunDisc.lookAt(0, 0, 0);
+  scene.add(sunDisc);
+
+  // A soft halo around the sun disc.
+  const halo = new THREE.Mesh(
+    new THREE.CircleGeometry(62, 32),
+    new THREE.MeshBasicMaterial({
+      color: 0xffe0a0,
+      transparent: true,
+      opacity: 0.28,
+      fog: false,
+    }),
+  );
+  halo.position.copy(sunDisc.position).multiplyScalar(0.999);
+  halo.lookAt(0, 0, 0);
+  scene.add(halo);
+
+  // Clouds: flat clusters of white spheres, drifting slowly on the wind.
+  const cloudMat = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.85,
+    fog: false,
   });
-  const cloudGeo = new THREE.SphereGeometry(1, 12, 8);
-  const clouds = new THREE.Group();
-  const spots = [
-    [-260, 150, -320, 42, 9, 18], [180, 170, -360, 55, 11, 22], [320, 140, 120, 48, 10, 20],
-    [-80, 180, 300, 60, 12, 24], [40, 160, -240, 36, 8, 16], [-340, 150, 60, 50, 10, 20],
-    [140, 165, 320, 52, 10, 21], [-180, 175, -180, 44, 9, 19],
-  ];
-  for (const [x, y, z, sx, sy, sz] of spots) {
-    const puff = new THREE.Group();
-    for (let i = 0; i < 4; i++) {
-      const m = new THREE.Mesh(cloudGeo, cloudMat);
-      m.position.set((i - 1.5) * sx * 0.42, (i % 2) * 2.5, (i % 3 - 1) * 4);
-      m.scale.set(sx * (0.5 + 0.14 * i), sy, sz * 0.5);
-      puff.add(m);
+  const clouds = [];
+  for (let i = 0; i < 9; i++) {
+    const group = new THREE.Group();
+    const puffs = randInt(3, 5);
+    for (let j = 0; j < puffs; j++) {
+      const puff = new THREE.Mesh(new THREE.SphereGeometry(rand(9, 18), 10, 8), cloudMat);
+      puff.position.set(rand(-22, 22), rand(-2, 3), rand(-8, 8));
+      puff.scale.y = 0.45;
+      group.add(puff);
     }
-    puff.position.set(x, y, z);
-    clouds.add(puff);
+    group.position.set(rand(-520, 520), rand(120, 210), rand(-520, 520));
+    group.userData.drift = rand(1.2, 2.6);
+    scene.add(group);
+    clouds.push(group);
   }
-  scene.add(clouds);
-  return { sky, clouds, uniforms };
+
+  function update(dt) {
+    for (const cloud of clouds) {
+      cloud.position.x += cloud.userData.drift * dt;
+      if (cloud.position.x > 560) cloud.position.x = -560;
+    }
+  }
+
+  return { update, dome, sunDisc, clouds };
 }

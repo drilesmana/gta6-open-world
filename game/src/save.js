@@ -1,46 +1,64 @@
-// Velora Heat — save / load.
-// Progress (cash, mission index, completed jobs, health, position) lives in
-// localStorage under one key. Saving happens on mission complete, on banking
-// cash and every 30 seconds of play. Loading is explicit: the title screen
-// offers Continue when a save exists.
-import { SAVE_KEY } from './config.js';
+// save.js — save / load for Velora Heat.
+// Stores money, mission progress and best score in localStorage.
+// No Three.js import here; this module is pure storage logic.
 
-export function loadSave() {
-  try {
-    const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (!data || typeof data !== 'object') return null;
-    // Sanitize: an old or hand-edited save must not break the game.
-    // Cash stays a non-negative number, health stays in range, and the
-    // position falls back to the garage start when it is not finite.
-    const clean = { ...data };
-    clean.cash = Number.isFinite(+data.cash) ? Math.max(0, +data.cash) : 0;
-    clean.missionIndex = Number.isFinite(+data.missionIndex) ? Math.max(0, Math.floor(+data.missionIndex)) : 0;
-    clean.health = Number.isFinite(+data.health) ? Math.min(100, Math.max(1, +data.health)) : 100;
-    if (!Number.isFinite(+data.x) || !Number.isFinite(+data.z)) {
-      clean.x = -26;
-      clean.z = 150;
-    }
-    return clean;
-  } catch {
-    return null;
+const KEY = 'velora-heat-save-v1';
+
+// Read a field from the shared state defensively: try several names,
+// fall back to the given default. The state object is owned by main.js,
+// but other systems may carry the same values under different keys.
+function read(state, names, fallback) {
+  if (!state) return fallback;
+  for (const name of names) {
+    const value = state[name];
+    if (value !== undefined && value !== null) return value;
   }
+  return fallback;
 }
 
-export function writeSave(data) {
+// saveGame(state): persist money, mission index and best score.
+// Returns true when the write succeeded, false when storage is
+// unavailable (private mode, disabled storage, non-browser env).
+export function saveGame(state) {
   try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify({ ...data, savedAt: Date.now() }));
+    if (typeof localStorage === 'undefined') return false;
+    const mission = read(state, ['mission', 'missionIndex'], 0);
+    const missionIndex = typeof mission === 'object' && mission !== null
+      ? read(mission, ['index', 'number'], 0)
+      : mission;
+    const data = {
+      money: read(state, ['money'], 0),
+      mission: missionIndex,
+      finished: read(state, ['finished', 'storyComplete'], false) ? true : false,
+      health: read(state, ['health'], 100),
+      best: read(state, ['best', 'bestScore'], 0),
+      savedAt: Date.now(),
+    };
+    localStorage.setItem(KEY, JSON.stringify(data));
     return true;
-  } catch {
+  } catch (err) {
     return false;
   }
 }
 
-export function clearSave() {
+// loadGame(): read the save back, or null when nothing is saved
+// (or storage is unavailable / the data is corrupt).
+export function loadGame() {
   try {
-    localStorage.removeItem(SAVE_KEY);
-  } catch {
-    // Storage unavailable (private mode): the game still plays.
+    if (typeof localStorage === 'undefined') return null;
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return null;
+    return {
+      money: typeof data.money === 'number' ? data.money : 0,
+      mission: typeof data.mission === 'number' ? data.mission : 0,
+      finished: data.finished === true,
+      health: typeof data.health === 'number' ? data.health : 100,
+      best: typeof data.best === 'number' ? data.best : 0,
+      savedAt: typeof data.savedAt === 'number' ? data.savedAt : 0,
+    };
+  } catch (err) {
+    return null;
   }
 }

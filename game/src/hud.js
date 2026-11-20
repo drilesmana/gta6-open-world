@@ -1,114 +1,175 @@
-// Velora Heat — HUD: money, wanted stars, objective, health, speed, prompts,
-// toasts and subtitles. Pure DOM over the canvas; the minimap is its own
-// canvas module. All ids live in index.html.
-export class Hud {
-  constructor() {
-    this.el = {};
-    for (const id of [
-      'money', 'stars', 'objective', 'objective-text', 'objective-sub', 'hp', 'speedo',
-      'speed', 'gear', 'prompt', 'toasts', 'subs', 'district', 'saveDot', 'escapeWrap', 'escape',
-      'pursuit', 'clock', 'dmg', 'hud',
-    ]) {
-      this.el[id] = document.getElementById(id);
+// hud.js — Velora Heat HUD.
+// Manipulates the DOM elements defined in index.html. Because the exact
+// element ids are owned by the page shell, every lookup tries several
+// likely ids and, when nothing matches, creates a fallback element so the
+// HUD still works. No Three.js import here; this module is pure DOM.
+
+// Find an element by any of the given ids, or null.
+function findEl(ids) {
+  if (typeof document === 'undefined') return null;
+  for (const id of ids) {
+    const el = document.getElementById(id);
+    if (el) return el;
+  }
+  return null;
+}
+
+// Find an element, or create a fallback div with the first id and a
+// sensible class, appended to the body (or to the hud container).
+function needEl(ids, cls) {
+  const found = findEl(ids);
+  if (found) return found;
+  if (typeof document === 'undefined') return null;
+  const el = document.createElement('div');
+  el.id = ids[0];
+  if (cls) el.className = cls;
+  document.body.appendChild(el);
+  return el;
+}
+
+function setText(el, text) {
+  if (el) el.textContent = text;
+}
+
+function showEl(el) {
+  if (el) el.style.display = '';
+}
+
+function hideEl(el) {
+  if (el) el.style.display = 'none';
+}
+
+// createHud(): no arguments. Returns the HUD controller.
+export function createHud() {
+  const healthEl = needEl(['health', 'hud-health', 'hp', 'health-bar'], 'hud-health');
+  const moneyEl = needEl(['money', 'hud-money', 'cash'], 'hud-money');
+  const wantedEl = needEl(['wanted', 'hud-wanted', 'wanted-stars', 'stars'], 'hud-wanted');
+  const speedEl = needEl(['speed', 'hud-speed', 'speedo'], 'hud-speed');
+  const objectiveEl = needEl(['objective', 'hud-objective', 'mission-objective'], 'hud-objective');
+  const bannerEl = needEl(['message', 'banner', 'hud-message', 'message-banner'], 'hud-message');
+  const titleEl = needEl(['title', 'title-screen', 'screen-title'], 'screen-title');
+  const briefEl = needEl(['brief', 'brief-screen', 'mission-brief'], 'screen-brief');
+  const finishEl = needEl(['finish', 'finish-screen', 'screen-finish'], 'screen-finish');
+  // The game-HUD container (holds money/health/wanted/speed/objective/
+  // minimap). It starts with class "hidden" in the page shell; it must
+  // be un-hidden when play starts and re-hidden on the overlay screens.
+  // findEl only — never create a second #hud.
+  const hudEl = findEl(['hud', 'hud-container', 'game-hud']);
+
+  let bannerTimer = null;
+
+  function showHudContainer() {
+    if (hudEl) {
+      hudEl.classList.remove('hidden');
+      hudEl.style.display = '';
     }
-    this.starSpans = [];
-    for (let i = 0; i < 5; i++) {
-      const s = document.createElement('span');
-      s.textContent = '★';
-      this.el.stars.appendChild(s);
-      this.starSpans.push(s);
-    }
-    this.toastTimer = null;
   }
 
-  show() {
-    this.el.hud.classList.remove('hidden');
+  function hideHudContainer() {
+    if (hudEl) hudEl.classList.add('hidden');
   }
 
-  hide() {
-    this.el.hud.classList.add('hidden');
+  function hideScreens() {
+    hideEl(titleEl);
+    hideEl(briefEl);
+    hideEl(finishEl);
   }
 
-  setMoney(cash) {
-    this.el.money.textContent = cash.toLocaleString('en-US');
-  }
-
-  setStars(level, escape01) {
-    this.starSpans.forEach((s, i) => s.classList.toggle('on', i < level));
-    this.el.stars.classList.toggle('flash', level > 0 && escape01 > 0.5);
-    this.el.escapeWrap.classList.toggle('hidden', level === 0);
-    if (level > 0) this.el.escape.style.width = `${Math.round(escape01 * 100)}%`;
-    this.el.pursuit.textContent = level === 0 ? 'COAST CLEAR'
-      : level <= 2 ? 'POLICE ON YOU' : level <= 3 ? 'PURSUIT' : 'FULL HEAT';
-  }
-
-  setHealth(hp) {
-    this.el.hp.firstElementChild.style.width = `${Math.round(hp)}%`;
-  }
-
-  setSpeed(kmh, driving) {
-    this.el.speedo.classList.toggle('hidden', !driving);
-    if (driving) {
-      this.el.speed.textContent = Math.round(kmh);
-      // Real gears by speed band, so the speedo reads like a car, not a switch.
-      this.el.gear.textContent = kmh < 1 ? 'P'
-        : kmh < 25 ? '1' : kmh < 50 ? '2' : kmh < 80 ? '3' : kmh < 110 ? '4' : '5';
+  function setHealth(value) {
+    const hp = Math.max(0, Math.min(100, Math.round(value)));
+    setText(healthEl, 'HP ' + hp);
+    if (healthEl) {
+      healthEl.style.width = '';
+      healthEl.dataset.value = String(hp);
     }
   }
 
-  setObjective(head, text, sub = '') {
-    this.el.objective.classList.remove('hidden');
-    this.el.objective.querySelector('#objective-head').textContent = head;
-    this.el['objective-text'].textContent = text;
-    this.el['objective-sub'].textContent = sub;
+  function setMoney(value) {
+    setText(moneyEl, '$' + Math.round(value).toLocaleString('en-US'));
   }
 
-  hideObjective() {
-    this.el.objective.classList.add('hidden');
+  function setWanted(level) {
+    const stars = Math.max(0, Math.min(5, Math.round(level)));
+    let text = '';
+    for (let i = 0; i < 5; i++) text += i < stars ? '★' : '☆';
+    setText(wantedEl, text);
+    if (wantedEl) wantedEl.dataset.value = String(stars);
   }
 
-  setDistrict(name) {
-    this.el.district.textContent = name;
+  // Alias used by some callers.
+  function setWantedStars(level) {
+    setWanted(level);
   }
 
-  setClock(text) {
-    this.el.clock.textContent = text;
+  function setSpeed(mps) {
+    const kmh = Math.round(Math.abs(mps) * 3.6);
+    setText(speedEl, kmh + ' km/h');
   }
 
-  prompt(html) {
-    if (!html) {
-      this.el.prompt.classList.add('hidden');
-      return;
+  function setObjective(text) {
+    setText(objectiveEl, text || '');
+  }
+
+  function showMessage(text, ms) {
+    setText(bannerEl, text || '');
+    showEl(bannerEl);
+    if (bannerTimer) clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(() => hideEl(bannerEl), ms || 2600);
+  }
+
+  function showTitle() {
+    hideScreens();
+    hideHudContainer();
+    showEl(titleEl);
+  }
+
+  function showBrief(title, text) {
+    hideScreens();
+    hideHudContainer();
+    if (briefEl) {
+      const titleNode = briefEl.querySelector('[data-brief-title]') || briefEl.querySelector('h2') || briefEl.querySelector('h1');
+      const textNode = briefEl.querySelector('[data-brief-text]') || briefEl.querySelector('p');
+      if (titleNode) titleNode.textContent = title || '';
+      if (textNode) textNode.textContent = text || '';
+      if (!titleNode && !textNode) briefEl.textContent = (title ? title + ' — ' : '') + (text || '');
     }
-    this.el.prompt.innerHTML = html;
-    this.el.prompt.classList.remove('hidden');
+    showEl(briefEl);
   }
 
-  toast(text, kind = '') {
-    const t = document.createElement('div');
-    t.className = `toast ${kind}`;
-    t.textContent = text;
-    this.el.toasts.appendChild(t);
-    setTimeout(() => t.remove(), 3400);
+  function showFinish(stats) {
+    hideScreens();
+    hideHudContainer();
+    if (finishEl) {
+      const s = stats || {};
+      const money = typeof s.money === 'number' ? s.money : 0;
+      const missions = typeof s.missions === 'number' ? s.missions : 0;
+      const textNode = finishEl.querySelector('[data-finish-text]') || finishEl.querySelector('p');
+      const line = 'Story complete — ' + missions + '/4 missions, $' + Math.round(money).toLocaleString('en-US') + ' saved. Nia\u2019s garage is safe.';
+      if (textNode) textNode.textContent = line;
+      else if (!finishEl.querySelector('h1') && !finishEl.querySelector('h2')) finishEl.textContent = line;
+    }
+    showEl(finishEl);
   }
 
-  subtitle(who, text, ms = 4200) {
-    const s = this.el.subs;
-    s.innerHTML = `<span class="who">${who}</span>${text}`;
-    clearTimeout(this.toastTimer);
-    this.toastTimer = setTimeout(() => {
-      s.innerHTML = '';
-    }, ms);
+  // Hide every overlay screen (game is playing).
+  function showGame() {
+    hideScreens();
+    showHudContainer();
+    hideEl(bannerEl);
   }
 
-  damageFlash(strength01) {
-    this.el.dmg.style.opacity = String(strength01);
-  }
-
-  saveFlash() {
-    this.el.saveDot.textContent = '· SAVED';
-    setTimeout(() => {
-      this.el.saveDot.textContent = '';
-    }, 1800);
-  }
+  return {
+    setHealth,
+    setMoney,
+    setWanted,
+    setWantedStars,
+    setSpeed,
+    setObjective,
+    showMessage,
+    showTitle,
+    showBrief,
+    showFinish,
+    showGame,
+    hideScreens,
+  };
 }
