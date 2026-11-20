@@ -221,10 +221,23 @@ async function boot() {
     // r186 removed PCFSoftShadowMap; PCFShadowMap is the supported soft type.
     if (THREE.PCFShadowMap !== undefined) renderer.shadowMap.type = THREE.PCFShadowMap;
   }
+  // Filmic tone mapping + sRGB output: highlights roll off warm instead of
+  // clipping to flat white, and paint/glass pick up a real sheen.
+  if (THREE.ACESFilmicToneMapping !== undefined) {
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
+  }
+  if (THREE.SRGBColorSpace !== undefined) renderer.outputColorSpace = THREE.SRGBColorSpace;
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0xffd9a0);
   if (THREE.Fog) scene.fog = new THREE.Fog(0xffd9a0, 120, 700);
+
+  // NOTE (r14): a procedural PMREM environment map was tried here and
+  // removed again — in headless SwiftShader every standard-material
+  // fragment pays a cubemap fetch for it and in-game FPS fell 1.0 -> 0.14.
+  // Paints instead get their sheen from the sun + hemisphere with low
+  // metalness (see materials.js); ACES + the warm sun carry the look.
 
   const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 2000);
   camera.position.set(0, 26, 34);
@@ -645,13 +658,19 @@ async function boot() {
   let camFallback = false;
   let camCheckAt = 0;
   let camCheckPos = null;
+  let camCheckPlayerPos = null;
   let lastPlayerCheck = null;
   let snapCamera = false;
 
   function updateCameraFallback(dt, now) {
     const pos = readPlayerPos();
-    if (!lastPlayerCheck) { lastPlayerCheck = pos; camCheckPos = camera.position.clone(); camCheckAt = now; return; }
-    const moved = Math.hypot(pos.x - lastPlayerCheck.x, pos.z - lastPlayerCheck.z);
+    if (!lastPlayerCheck) {
+      lastPlayerCheck = pos;
+      camCheckPos = camera.position.clone();
+      camCheckPlayerPos = pos;
+      camCheckAt = now;
+      return;
+    }
     lastPlayerCheck = pos;
     if (camFallback) {
       const heading = readHeading();
@@ -675,13 +694,23 @@ async function boot() {
       camera.lookAt(pos.x + fx * 6, 1.5, pos.z + fz * 6);
       return;
     }
-    if (now - camCheckAt > 2500 && moved > 0.5) {
-      const camMoved = camCheckPos ? camera.position.distanceTo(camCheckPos) : 99;
-      if (camMoved < 0.5) {
-        camFallback = true;
-        report('camera', new Error('camera never moved while player did; main.js took over follow'));
+    // Compare against the player position at the last check, not the last
+    // frame: per-frame movement (dt <= 0.05) can never exceed 0.5 m, so the
+    // old check could never fire and the camera stayed at the title view.
+    if (now - camCheckAt > 2500) {
+      const moved = camCheckPlayerPos
+        ? Math.hypot(pos.x - camCheckPlayerPos.x, pos.z - camCheckPlayerPos.z)
+        : 0;
+      if (moved > 0.5) {
+        const camMoved = camCheckPos ? camera.position.distanceTo(camCheckPos) : 99;
+        if (camMoved < 0.5) {
+          camFallback = true;
+          snapCamera = true;
+          report('camera', new Error('camera never moved while player did; main.js took over follow'));
+        }
       }
       camCheckPos = camera.position.clone();
+      camCheckPlayerPos = pos;
       camCheckAt = now;
     }
   }
@@ -744,6 +773,7 @@ async function boot() {
 
     // World updates.
     if (sky) safeCall('sky', () => { if (typeof sky.update === 'function') sky.update(dt); });
+    if (sun && typeof sun.update === 'function') safeCall('sun-follow', () => sun.update(readPlayerPos()));
     if (traffic) safeCall('traffic', () => { if (typeof traffic.update === 'function') traffic.update(dt); });
     if (pedestrians) safeCall('pedestrians', () => { if (typeof pedestrians.update === 'function') pedestrians.update(dt); });
 
@@ -926,6 +956,7 @@ async function boot() {
       }
       scene.background = new THREE.Color(0xff8c42);
       if (scene.fog) scene.fog.color = new THREE.Color(0xff8c42);
+      if (sky && typeof sky.setMode === 'function') safeCall('sky-sunset', () => sky.setMode('sunset'));
       return true;
     },
     setGolden() {
@@ -937,6 +968,7 @@ async function boot() {
       }
       scene.background = new THREE.Color(0xffd9a0);
       if (scene.fog) scene.fog.color = new THREE.Color(0xffd9a0);
+      if (sky && typeof sky.setMode === 'function') safeCall('sky-golden', () => sky.setMode('golden'));
       return true;
     },
   };

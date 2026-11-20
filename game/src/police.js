@@ -171,6 +171,8 @@ export function createPolice(scene, city, makeCar) {
         if (bar) {
           bar.redMat.emissiveIntensity = flash ? 2.2 : 0.15;
           bar.blueMat.emissiveIntensity = flash ? 0.15 : 2.2;
+          if (bar.redSprite) bar.redSprite.material.opacity = flash ? 0.85 : 0.1;
+          if (bar.blueSprite) bar.blueSprite.material.opacity = flash ? 0.1 : 0.85;
         }
       }
 

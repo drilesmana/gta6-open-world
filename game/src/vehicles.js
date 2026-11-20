@@ -36,6 +36,26 @@ function cap(s) {
   return String(s).charAt(0).toUpperCase() + String(s).slice(1);
 }
 
+// Shared radial glow texture for the police light-bar halos.
+let glowTextureCache = null;
+function makeGlowTexture() {
+  if (glowTextureCache) return glowTextureCache;
+  const THREE = three();
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.4, 'rgba(255,255,255,0.6)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  glowTextureCache = new THREE.CanvasTexture(canvas);
+  return glowTextureCache;
+}
+
 function mat(materials, keys, color, opts) {
   if (materials) {
     for (const k of keys) {
@@ -148,6 +168,29 @@ export function makeCar(colour, kind, materials) {
     group.add(tl);
   }
 
+  // Shaped-car details: chrome bumpers, dark grille, side mirrors and a
+  // painted roof panel so the car reads as designed, not a bare box.
+  const bumperGeo = new THREE.BoxGeometry(W * 0.96, 0.12, 0.16);
+  for (const z of [L / 2 + 0.02, -L / 2 - 0.02]) {
+    const bumper = new THREE.Mesh(bumperGeo, metal);
+    bumper.position.set(0, 0.42, z);
+    group.add(bumper);
+  }
+  const grille = new THREE.Mesh(new THREE.BoxGeometry(W * 0.5, 0.12, 0.06), tyre);
+  grille.position.set(0, 0.6, L / 2 + 0.01);
+  group.add(grille);
+  const mirrorGeo = new THREE.BoxGeometry(0.1, 0.08, 0.22);
+  for (const x of [-(W / 2 + 0.08), W / 2 + 0.08]) {
+    const mirror = new THREE.Mesh(mirrorGeo, paint);
+    mirror.position.set(x, 0.98, L * 0.18);
+    group.add(mirror);
+  }
+  const roofPanel = new THREE.Mesh(
+    new THREE.BoxGeometry(W * 0.78, 0.06, cabinLen * 0.92), paint,
+  );
+  roofPanel.position.set(0, 0.55 + k.bodyH / 2 + k.cabinH - 0.03, kindName === 'truck' ? L * 0.28 : -L * 0.04);
+  group.add(roofPanel);
+
   // Police light bar: red left, blue right, flashed by the police system.
   let lightBar = null;
   if (kindName === 'police') {
@@ -161,7 +204,23 @@ export function makeCar(colour, kind, materials) {
     const blue = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.12, 0.26), blueMat);
     blue.position.set(0.22, 0.55 + k.bodyH / 2 + k.cabinH + 0.08, -L * 0.04);
     group.add(red, blue);
-    lightBar = { red, blue, redMat, blueMat };
+    // Additive glow halos so the flash reads at distance, not just on the bar.
+    const glowTex = makeGlowTexture();
+    const barY = 0.55 + k.bodyH / 2 + k.cabinH + 0.1;
+    function glowSprite(color, x) {
+      const m = new THREE.SpriteMaterial({
+        map: glowTex, color, transparent: true, opacity: 0.5,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const s = new THREE.Sprite(m);
+      s.position.set(x, barY, -L * 0.04);
+      s.scale.setScalar(1.6);
+      group.add(s);
+      return s;
+    }
+    const redSprite = glowSprite(0xff2020, -0.22);
+    const blueSprite = glowSprite(0x2050ff, 0.22);
+    lightBar = { red, blue, redMat, blueMat, redSprite, blueSprite };
     // Black-and-white doors: dark stripe along the body.
     const stripe = new THREE.Mesh(new THREE.BoxGeometry(W + 0.02, 0.2, L * 0.7), mat(materials, ['policeStripe'], 0x1c1c20, { roughness: 0.6 }));
     stripe.position.y = 0.55;

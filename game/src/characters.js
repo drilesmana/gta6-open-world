@@ -72,7 +72,7 @@ export function makePerson(variant, materials) {
   group.name = 'person-' + name;
 
   // Legs pivot at the hip so the swing rotates around the top of the leg.
-  function limb(w, len, material, x, y) {
+  function limb(w, len, material, x, y, withShoe) {
     const pivot = new THREE.Group();
     pivot.position.set(x, y, 0);
     const geo = new THREE.BoxGeometry(w, len, w * 0.9);
@@ -80,11 +80,21 @@ export function makePerson(variant, materials) {
     const mesh = new THREE.Mesh(geo, material);
     mesh.castShadow = true;
     pivot.add(mesh);
+    // Shoe at the foot so the leg ends in footwear, not a bare box edge.
+    if (withShoe) {
+      const shoe = new THREE.Mesh(
+        new THREE.BoxGeometry(w + 0.03, 0.08, w + 0.14),
+        mat(materials, ['shoe', 'tyre'], 0x1a1c20, { roughness: 0.9 }),
+      );
+      shoe.position.set(0, -len - 0.02, 0.04);
+      shoe.castShadow = true;
+      pivot.add(shoe);
+    }
     return pivot;
   }
 
-  const leftLeg = limb(0.17, 0.52, pantsMat, -0.11, 0.78);
-  const rightLeg = limb(0.17, 0.52, pantsMat, 0.11, 0.78);
+  const leftLeg = limb(0.17, 0.52, pantsMat, -0.11, 0.78, true);
+  const rightLeg = limb(0.17, 0.52, pantsMat, 0.11, 0.78, true);
   const leftArm = limb(0.12, 0.5, shirtMat, -0.29, 1.32);
   const rightArm = limb(0.12, 0.5, shirtMat, 0.29, 1.32);
 
@@ -105,6 +115,27 @@ export function makePerson(variant, materials) {
 
   group.add(leftLeg, rightLeg, leftArm, rightArm, body, head, hair);
   group.scale.setScalar(scale);
+
+  // Dario's cap: dark-coral crown + brim, so the player reads at a glance.
+  if (name === 'dario') {
+    const capMat = mat(materials, ['cap'], 0x8a2f2f, { roughness: 0.85 });
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.09, 0.3), capMat);
+    cap.position.y = 1.7;
+    cap.castShadow = true;
+    const brim = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.04, 0.16), capMat);
+    brim.position.set(0, 1.67, 0.2);
+    group.add(cap, brim);
+  }
+
+  // Soft contact shadow disc: grounds the feet where the sun shadow is
+  // soft or out of frame (on grass; roads already hide it under their top).
+  const contact = new THREE.Mesh(
+    new THREE.CircleGeometry(0.45, 16),
+    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.25, depthWrite: false }),
+  );
+  contact.rotation.x = -Math.PI / 2;
+  contact.position.y = 0.02;
+  group.add(contact);
 
   // Walk swing: phase advances with distance walked; amount 0..1 fades it in/out.
   // Legs swing opposite, arms counter-swing. Called by pedestrians / player.
