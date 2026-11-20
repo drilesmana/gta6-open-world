@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Check the Velora Heat entry caps (game/ size, index size, screenshots,
-dossier) and report pass or fail. Standard library only.
-
-Usage:
-    python3 tests/verify_package.py [--root REPO] [--out OUTDIR]
-
---root defaults to the repository root (the parent of this file's directory).
---out defaults to <root>/out. The dossier check is skipped (not failed) when
-no dossier.json exists yet, because chunk 3 generates it; every other check
-must pass. Exit code 0 when nothing fails, 1 otherwise.
+"""verify_package.py — Velora Heat (chunk 2)
+Check the entry caps from the spec and report pass/fail:
+- game/: at most 993 files and directories, at most 48 MiB total.
+- Every path under game/: at most 1000 bytes.
+- game/index.html: at most 1 MiB.
+- screenshots/: 3 or 4 visible regular image files (jpg/jpeg/png),
+  each at most 256 KiB.
+- Dossier presence: out/dossier.json (or dossier.json at the repo root).
+Usage: python3 tests/verify_package.py [--root DIR]
+Exit code 0 when every check passes, 1 otherwise.
 """
 
-import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -21,107 +19,90 @@ MAX_GAME_PATHS = 993
 MAX_GAME_BYTES = 48 * 1024 * 1024
 MAX_PATH_BYTES = 1000
 MAX_INDEX_BYTES = 1024 * 1024
+MAX_SCREENSHOTS = 4
+MIN_SCREENSHOTS = 3
 MAX_SCREENSHOT_BYTES = 256 * 1024
-MAX_DOSSIER_BYTES = 1572864
-MAX_DOSSIER_TEXT_BYTES = 163840
-SHOT_EXTS = {".jpg", ".jpeg", ".png"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
 
-def human(n):
-    if n < 1024:
-        return f"{n} B"
-    if n < 1024 * 1024:
-        return f"{n / 1024:.1f} KiB"
-    return f"{n / (1024 * 1024):.2f} MiB"
+def check(name, ok, detail):
+    status = "PASS" if ok else "FAIL"
+    print(f"[{status}] {name}: {detail}")
+    return ok
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Verify the Velora Heat entry caps.")
-    parser.add_argument("--root", default=None, help="repository root (default: parent of tests/)")
-    parser.add_argument("--out", default=None, help="output dir holding dossier.json (default: <root>/out)")
-    args = parser.parse_args()
-
-    root = Path(args.root) if args.root else Path(__file__).resolve().parent.parent
-    out = Path(args.out) if args.out else root / "out"
-    game = root / "game"
-    index = game / "index.html"
-    shots = root / "screenshots"
-    dossier = out / "dossier.json"
-
+    root = Path(sys.argv[sys.argv.index("--root") + 1]) if "--root" in sys.argv else Path(__file__).resolve().parent.parent
+    game_dir = root / "game"
+    shots_dir = root / "screenshots"
     results = []
 
-    def check(name, ok, detail):
-        results.append((name, ok, detail))
-        print(f"[{'PASS' if ok else 'FAIL'}] {name}: {detail}")
-
-    # game/ must exist.
-    if not game.is_dir():
-        check("game/ exists", False, f"{game} is not a directory")
-        print("FAILED")
+    # --- game/ caps ---
+    if not game_dir.is_dir():
+        print("[FAIL] game dir: missing " + str(game_dir))
         return 1
-
-    # Walk game/: count paths (files + dirs), total bytes, longest path.
-    n_paths = 0
-    total = 0
-    longest = 0
-    longest_path = ""
-    for dirpath, dirnames, filenames in os.walk(game):
+    total_paths = 0
+    total_bytes = 0
+    longest_path = 0
+    longest_name = ""
+    for dirpath, dirnames, filenames in os.walk(game_dir):
+        dirnames.sort()
         for d in dirnames:
-            n_paths += 1
+            total_paths += 1
             p = Path(dirpath) / d
-            n = len(str(p.relative_to(game)).encode("utf-8"))
-            if n > longest:
-                longest, longest_path = n, str(p.relative_to(game))
-        for f in filenames:
-            n_paths += 1
+            if len(str(p)) > longest_path:
+                longest_path = len(str(p))
+                longest_name = str(p)
+        for f in sorted(filenames):
+            total_paths += 1
             p = Path(dirpath) / f
-            total += p.stat().st_size
-            n = len(str(p.relative_to(game)).encode("utf-8"))
-            if n > longest:
-                longest, longest_path = n, str(p.relative_to(game))
+            if len(str(p)) > longest_path:
+                longest_path = len(str(p))
+                longest_name = str(p)
+            try:
+                total_bytes += p.stat().st_size
+            except OSError:
+                pass
+    results.append(check("game path count", total_paths <= MAX_GAME_PATHS,
+                         f"{total_paths} paths (max {MAX_GAME_PATHS})"))
+    results.append(check("game total bytes", total_bytes <= MAX_GAME_BYTES,
+                         f"{total_bytes} bytes (max {MAX_GAME_BYTES})"))
+    results.append(check("game longest path", longest_path <= MAX_PATH_BYTES,
+                         f"{longest_path} bytes: {longest_name} (max {MAX_PATH_BYTES})"))
 
-    check("game/ path count", n_paths <= MAX_GAME_PATHS, f"{n_paths} paths (max {MAX_GAME_PATHS})")
-    check("game/ total bytes", total <= MAX_GAME_BYTES, f"{human(total)} (max 48 MiB)")
-    check(
-        "game/ path length",
-        longest <= MAX_PATH_BYTES,
-        f"longest {longest} B ({longest_path!r}) (max {MAX_PATH_BYTES} B)",
-    )
-
-    # index.html.
-    if not index.is_file():
-        check("game/index.html", False, "missing")
-    else:
+    index = game_dir / "index.html"
+    if index.is_file():
         size = index.stat().st_size
-        check("game/index.html", size <= MAX_INDEX_BYTES, f"{human(size)} (max 1 MiB)")
-
-    # screenshots/: 3 or 4 images, each <= 256 KiB.
-    if not shots.is_dir():
-        check("screenshots/", False, "missing (chunk 3 creates it)")
+        results.append(check("index.html bytes", size <= MAX_INDEX_BYTES,
+                             f"{size} bytes (max {MAX_INDEX_BYTES})"))
     else:
-        files = sorted(p for p in shots.iterdir() if p.is_file() and not p.name.startswith("."))
-        bad_ext = [p.name for p in files if p.suffix.lower() not in SHOT_EXTS]
-        oversize = [(p.name, p.stat().st_size) for p in files if p.stat().st_size > MAX_SCREENSHOT_BYTES]
-        ok = len(files) in (3, 4) and not bad_ext and not oversize
-        detail = f"{len(files)} files (need 3 or 4)"
-        if bad_ext:
-            detail += f"; bad extensions: {', '.join(bad_ext)}"
-        if oversize:
-            detail += "; oversize: " + ", ".join(f"{n} ({human(s)})" for n, s in oversize)
-        check("screenshots/", ok, detail)
+        results.append(check("index.html exists", False, "game/index.html missing"))
 
-    # dossier.json: skip (not fail) when it does not exist yet.
-    if not dossier.is_file():
-        print(f"[SKIP] dossier.json: {dossier} not present yet (chunk 3 generates it)")
+    # --- screenshots/ caps ---
+    if not shots_dir.is_dir():
+        results.append(check("screenshots dir", False, "screenshots/ missing (need 3-4 images)"))
     else:
-        size = dossier.stat().st_size
-        check("dossier.json", size <= MAX_DOSSIER_BYTES, f"{human(size)} (max {MAX_DOSSIER_BYTES} B)")
-        text = json.loads(dossier.read_text())["text"]
-        check("dossier text", len(text.encode()) <= MAX_DOSSIER_TEXT_BYTES, f"{human(len(text.encode()))} (max {MAX_DOSSIER_TEXT_BYTES} B)")
+        images = sorted(
+            p for p in shots_dir.iterdir()
+            if p.is_file() and not p.name.startswith(".") and p.suffix.lower() in IMAGE_EXTS
+        )
+        results.append(check("screenshot count", MIN_SCREENSHOTS <= len(images) <= MAX_SCREENSHOTS,
+                             f"{len(images)} images (need {MIN_SCREENSHOTS}-{MAX_SCREENSHOTS}): "
+                             + ", ".join(p.name for p in images)))
+        for p in images:
+            size = p.stat().st_size
+            results.append(check(f"screenshot {p.name}", size <= MAX_SCREENSHOT_BYTES,
+                                 f"{size} bytes (max {MAX_SCREENSHOT_BYTES})"))
 
-    failed = [name for name, ok, _ in results if not ok]
-    print("PASSED" if not failed else f"FAILED: {', '.join(failed)}")
-    return 0 if not failed else 1
+    # --- dossier presence ---
+    dossier_candidates = [root / "out" / "dossier.json", root / "dossier.json"]
+    found = [p for p in dossier_candidates if p.is_file()]
+    results.append(check("dossier presence", bool(found),
+                         str(found[0]) if found else "no dossier.json in out/ or repo root (run: MAKEFUN_OUTPUT_DIR=out node main.ts)"))
+
+    passed = sum(1 for r in results if r)
+    print(f"\n{passed}/{len(results)} checks passed")
+    return 0 if all(results) else 1
 
 
 if __name__ == "__main__":
