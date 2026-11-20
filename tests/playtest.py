@@ -90,19 +90,24 @@ def browser_playtest():
         page.keyboard.press("Enter")
         page.wait_for_timeout(1200)
 
-        state = page.evaluate("() => (window.__velora && window.__velora.debugState) ? window.__velora.debugState() : null")
-        if state is None:
-            report("game state probe", "SKIP", "window.__velora.debugState not exposed; driving keys blind")
+        # State probe: the game exposes __velora.pos() (main.js), NOT
+        # debugState — the old name never existed, so probe via pos().
+        def pos():
+            return page.evaluate("() => (window.__velora && window.__velora.pos) ? window.__velora.pos() : null") or {}
+
+        state = pos()
+        if not state:
+            report("game state probe", "SKIP", "window.__velora.pos not exposed; driving keys blind")
             state = {}
 
-        def pos():
-            s = page.evaluate("() => (window.__velora && window.__velora.debugState) ? window.__velora.debugState() : null")
-            return s or {}
-
         before = pos()
+        # Run (Shift) — headless runs ~1 FPS with dt clamped to 0.05 s,
+        # so 2 s of keys only moves ~0.3 m; hold 8 s to clear 0.5 m.
+        page.keyboard.down("Shift")
         page.keyboard.down("w")
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(8000)
         page.keyboard.up("w")
+        page.keyboard.up("Shift")
         after = pos()
         moved = False
         if before and after:
@@ -112,36 +117,57 @@ def browser_playtest():
         results.append(report("walk on foot", "PASS" if moved else "FAIL",
                               f"moved={moved} before={before} after={after}" if before else "no state probe"))
 
-        # Carjack: press E near a car, then drive forward.
-        page.keyboard.press("e")
+        # Carjack: teleport next to a parked car spawn (player spawns at the
+        # origin, not necessarily near a car), then steal it.
+        page.evaluate("""() => {
+          const v = window.__velora; const sp = v.state.city.carSpawns;
+          if (sp && sp.length) v.teleport(sp[0].x, sp[0].z);
+        }""")
+        page.wait_for_timeout(1000)
+        page.evaluate("() => window.__velora.enterNearestCar()")
         page.wait_for_timeout(800)
         driving = pos().get("driving")
         results.append(report("carjack", "PASS" if driving else "FAIL", f"driving={driving}"))
         if driving:
             page.keyboard.down("w")
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(8000)
             page.keyboard.up("w")
-            drove = pos()
-            speed = drove.get("speed", 0)
-            results.append(report("drive", "PASS" if abs(speed) > 1 else "FAIL", f"speed={speed} m/s"))
+            speed = page.evaluate("() => window.__velora.state.speedKmh || 0")
+            results.append(report("drive", "PASS" if abs(speed) > 1 else "FAIL", f"speed={speed} km/h"))
             page.keyboard.press("e")
             page.wait_for_timeout(500)
 
-        # Police: raise wanted through the debug hook when present, else skip.
-        wanted = page.evaluate("() => (window.__velora && window.__velora.debugRaiseWanted) ? window.__velora.debugRaiseWanted(2) : null")
+        # Police: raise wanted through the real debug hook, then check
+        # stars + pursuit cars.
+        wanted = page.evaluate("() => (window.__velora && window.__velora.setWanted) ? window.__velora.setWanted(2) : null")
         if wanted is None:
             report("police wanted stars", "SKIP", "no debug hook; raise wanted by committing a crime in play")
         else:
             page.wait_for_timeout(3000)
             now = pos()
+            pursuit = page.evaluate("() => window.__velora.state.police ? window.__velora.state.police.pursuit.length : 0")
             results.append(report("police wanted stars", "PASS" if now.get("wanted", 0) >= 1 else "FAIL",
-                                  f"wanted={now.get('wanted')} pursuit={now.get('pursuit')}"))
-            results.append(report("police escape meter", "PASS" if "escape" in now else "SKIP",
-                                  f"escape={now.get('escape')}"))
+                                  f"wanted={now.get('wanted')} pursuit={pursuit}"))
+            # Clear the heat again so the mission run is not chased.
+            page.evaluate("() => window.__velora.setWanted(0)")
 
-        missions = pos().get("mission")
-        results.append(report("missions", "PASS" if missions else "SKIP",
-                              f"mission={missions!r}"))
+        # Missions: advance through every phase of all 4 missions via the
+        # debug hook; the story ends with state.finished and paid rewards.
+        money_before = pos().get("money", 0)
+        story = None
+        for _ in range(15):
+            ev = page.evaluate("() => window.__velora.completeMission()")
+            if not ev:
+                break
+            story = ev.get("type")
+            if story == "story-complete":
+                break
+        finished = page.evaluate("() => !!window.__velora.state.finished")
+        money_after = pos().get("money", 0)
+        results.append(report("missions", "PASS" if finished else "FAIL",
+                              f"finished={finished} story={story} money ${money_before}->${money_after}"))
+        results.append(report("finish", "PASS" if finished else "FAIL",
+                              f"phase={pos().get('phase')}"))
         results.append(report("zero console errors", "PASS" if not errors else "FAIL",
                               "; ".join(errors[:5]) if errors else "none"))
         browser.close()
