@@ -32,6 +32,10 @@ export const CONFIG = {
   startingHealth: 100,
   maxHealth: 100,
 
+  // Crowd — busy GTA streets (r15: raised from 14 peds / 12 traffic cars)
+  pedestrians: { count: 36 }, // sidewalk walkers near the player
+  traffic: { count: 30 },     // AI cars on the road network
+
   // Palette — golden hour over a coastal city
   palette: {
     ink: 0x1d2430,     // dark UI / shadows

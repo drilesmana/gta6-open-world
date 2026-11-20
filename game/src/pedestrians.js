@@ -44,7 +44,9 @@ const VARIANTS = ['walker', 'commuter', 'tourist', 'local', 'runner', 'elder', '
 
 export function createPedestrians(scene, city, makePerson) {
   const THREE = three();
-  const rawWaypoints = (city && (city.sidewalkWaypoints || city.waypoints || city.pedestrianWaypoints)) || [];
+  // r15: city.js returns the waypoint list as `sidewalks` — include it, or
+  // no walker ever spawns (the old key list matched nothing).
+  const rawWaypoints = (city && (city.sidewalkWaypoints || city.sidewalks || city.waypoints || city.pedestrianWaypoints)) || [];
   const waypoints = rawWaypoints.map(pointXZ).filter(Boolean);
   const count = cfgNum(['pedestrians.count', 'pedestrianCount', 'pedestrians.walkers'], 14);
   const walkMin = cfgNum(['pedestrians.minSpeed', 'pedestrian.walkMin'], 0.9);
