@@ -143,21 +143,49 @@ export function createCity(scene, materials) {
   }
 
   // Sidewalks: lighter strips flanking each road, plus waypoint list.
+  // r16: SEGMENTED — each strip is cut at every cross-road so the sidewalk
+  // never crosses a road surface. Before, full-length strips ran across
+  // every intersection and read as pavement cutting through the road.
+  // Segments run block-to-block (64 m between road edges, 48 m at the city
+  // edge) as two InstancedMeshes, one per direction, 144 instances each.
   const sidewalks = [];
-  const walkGeoX = new THREE.BoxGeometry(CONFIG.citySize, 0.12, walkW);
-  const walkGeoZ = new THREE.BoxGeometry(walkW, 0.12, CONFIG.citySize);
   const off = roadW / 2 + walkW / 2;
-  for (const l of lines) {
-    for (const s of [-off, off]) {
-      const wx = new THREE.Mesh(walkGeoX, materials.sidewalk);
-      wx.position.set(0, 0.06, l + s);
-      wx.receiveShadow = true;
-      group.add(wx);
-      const wz = new THREE.Mesh(walkGeoZ, materials.sidewalk);
-      wz.position.set(l + s, 0.06, 0);
-      wz.receiveShadow = true;
-      group.add(wz);
+  const segCentres = [-296, -228, -152, -76, 0, 76, 152, 228, 296];
+  const segLens = [48, 64, 64, 64, 64, 64, 64, 64, 48];
+  const segCount = lines.length * 2 * segCentres.length;
+  {
+    const dummy = new THREE.Object3D();
+    const walkX = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1, 0.12, walkW), materials.sidewalk, segCount,
+    );
+    const walkZ = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(walkW, 0.12, 1), materials.sidewalk, segCount,
+    );
+    let xi = 0;
+    let zi = 0;
+    for (const l of lines) {
+      for (const s of [-off, off]) {
+        for (let k = 0; k < segCentres.length; k++) {
+          const c = segCentres[k];
+          const len = segLens[k];
+          dummy.position.set(c, 0.06, l + s);
+          dummy.scale.set(len, 1, 1);
+          dummy.rotation.set(0, 0, 0);
+          dummy.updateMatrix();
+          walkX.setMatrixAt(xi++, dummy.matrix);
+          dummy.position.set(l + s, 0.06, c);
+          dummy.scale.set(1, 1, len);
+          dummy.updateMatrix();
+          walkZ.setMatrixAt(zi++, dummy.matrix);
+        }
+      }
     }
+    walkX.receiveShadow = true;
+    walkZ.receiveShadow = true;
+    group.add(walkX);
+    group.add(walkZ);
+  }
+  for (const l of lines) {
     // Waypoints every ~40 m along both sidewalks of this line.
     for (let t = -half + 20; t <= half - 20; t += 40) {
       sidewalks.push(new THREE.Vector3(t, 0, l - off));

@@ -67,7 +67,7 @@ export function createTraffic(scene, city, makeCar) {
   const count = cfgNum(['traffic.count', 'trafficCount', 'traffic.cars'], 12);
   const cruiseMin = cfgNum(['traffic.minSpeed', 'traffic.cruiseMin'], 8);
   const cruiseMax = cfgNum(['traffic.maxSpeed', 'traffic.cruiseMax'], 14);
-  const despawnDist = cfgNum(['traffic.despawnDistance', 'traffic.despawnDist'], 240);
+  const despawnDist = cfgNum(['traffic.despawnDistance', 'traffic.despawnDist'], 180);
 
   const traffic = {
     cars: [], // live records: { group, segment, t, speed, cruise, lateral }
@@ -200,7 +200,7 @@ export function createTraffic(scene, city, makeCar) {
             const mx = (seg.start.x + seg.end.x) / 2;
             const mz = (seg.start.z + seg.end.z) / 2;
             const d = dist2(mx, mz, px, pz);
-            return d > 60 * 60 && d < 160 * 160;
+            return d > 40 * 40 && d < 130 * 130;
           });
           const seg = nearRoads.length ? pick(nearRoads) : pick(roads);
           if (seg) {
@@ -214,6 +214,21 @@ export function createTraffic(scene, city, makeCar) {
     },
   };
 
-  for (let i = 0; i < count; i++) traffic.spawnCar();
+  // r16: most cars start on roads near the garage block (lines within
+  // 114 m of origin, mid-stretch) so the streets around the camera are
+  // busy from the first frame instead of spread over the whole city.
+  const homeRoads = roads.filter((seg) => {
+    const mid = seg.dir.x !== 0
+      ? Math.abs((seg.start.z + seg.end.z) / 2)
+      : Math.abs((seg.start.x + seg.end.x) / 2);
+    return mid <= 114;
+  });
+  for (let i = 0; i < count; i++) {
+    if (homeRoads.length && Math.random() < 0.75) {
+      traffic.spawnCar(pick(homeRoads), 0.35 + Math.random() * 0.3);
+    } else {
+      traffic.spawnCar();
+    }
+  }
   return traffic;
 }

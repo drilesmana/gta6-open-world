@@ -674,8 +674,14 @@ async function boot() {
     lastPlayerCheck = pos;
     if (camFallback) {
       const heading = readHeading();
-      const fx = -Math.sin(heading);
-      const fz = -Math.cos(heading);
+      // r16: forward vector — the camera sits BEHIND the player and looks
+      // ahead. Was negated: the fallback camera sat in front of the player
+      // and looked backward, so driving shots showed the empty road behind
+      // instead of the traffic ahead (the module chase cameras are never
+      // called — main.js never passes the camera to them — so this
+      // fallback IS the game's camera).
+      const fx = Math.sin(heading);
+      const fz = Math.cos(heading);
       const dist = state.car ? 13 : 9;
       const height = state.car ? 5.5 : 4;
       const tx = pos.x - fx * dist;

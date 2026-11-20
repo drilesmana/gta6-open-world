@@ -51,7 +51,7 @@ export function createPedestrians(scene, city, makePerson) {
   const count = cfgNum(['pedestrians.count', 'pedestrianCount', 'pedestrians.walkers'], 14);
   const walkMin = cfgNum(['pedestrians.minSpeed', 'pedestrian.walkMin'], 0.9);
   const walkMax = cfgNum(['pedestrians.maxSpeed', 'pedestrian.walkMax'], 1.7);
-  const despawnDist = cfgNum(['pedestrians.despawnDistance', 'pedestrian.despawnDist'], 200);
+  const despawnDist = cfgNum(['pedestrians.despawnDistance', 'pedestrian.despawnDist'], 150);
 
   const peds = {
     pedestrians: [], // live records: { group, target, speed, phase, idle }
@@ -128,7 +128,7 @@ export function createPedestrians(scene, city, makePerson) {
         if (dist2(rec.group.position.x, rec.group.position.z, px, pz) > despawnDist * despawnDist) {
           const near = waypoints.filter((w) => {
             const d = dist2(w.x, w.z, px, pz);
-            return d > 40 * 40 && d < 140 * 140;
+            return d > 25 * 25 && d < 110 * 110;
           });
           const spot = near.length ? pick(near) : pick(waypoints);
           if (spot) {
@@ -141,6 +141,14 @@ export function createPedestrians(scene, city, makePerson) {
     },
   };
 
-  for (let i = 0; i < count; i++) peds.spawnPedestrian();
+  // r16: most walkers start near the player start (garage block) so the
+  // streets around the camera are busy from the first frame, instead of
+  // spread thin over the whole 640 m city.
+  const home = city && city.playerStart ? pointXZ(city.playerStart) : { x: 0, z: 0 };
+  const nearHome = waypoints.filter((w) => dist2(w.x, w.z, home.x, home.z) < 130 * 130);
+  for (let i = 0; i < count; i++) {
+    const at = nearHome.length && Math.random() < 0.75 ? pick(nearHome) : undefined;
+    peds.spawnPedestrian(at);
+  }
   return peds;
 }
