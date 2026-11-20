@@ -1,64 +1,83 @@
-// save.js — save / load for Velora Heat.
-// Stores money, mission progress and best score in localStorage.
-// No Three.js import here; this module is pure storage logic.
+// Velora Heat — save system (chunk 3, written from the spec only).
+// Persists money, mission progress and best score to localStorage.
+// No imports. Every call is guarded: a missing or blocked localStorage
+// must never throw into the game loop.
 
-const KEY = 'velora-heat-save-v1';
+const SAVE_KEY = 'velora-heat-save-v1';
 
-// Read a field from the shared state defensively: try several names,
-// fall back to the given default. The state object is owned by main.js,
-// but other systems may carry the same values under different keys.
-function read(state, names, fallback) {
-  if (!state) return fallback;
-  for (const name of names) {
-    const value = state[name];
-    if (value !== undefined && value !== null) return value;
+function readStorage() {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    return localStorage;
+  } catch (_err) {
+    return null;
   }
-  return fallback;
 }
 
-// saveGame(state): persist money, mission index and best score.
-// Returns true when the write succeeded, false when storage is
-// unavailable (private mode, disabled storage, non-browser env).
 export function saveGame(state) {
+  const store = readStorage();
+  if (!store || !state) return false;
+  const missionIndex = typeof state.mission === 'number'
+    ? state.mission
+    : (state.missions && typeof state.missions.currentIndex === 'number'
+      ? state.missions.currentIndex
+      : 0);
+  const data = {
+    version: 1,
+    money: typeof state.money === 'number' ? Math.round(state.money) : 0,
+    mission: missionIndex,
+    missionIndex,
+    bestScore: typeof state.bestScore === 'number' ? Math.round(state.bestScore) : 0,
+    health: typeof state.health === 'number' ? Math.round(state.health) : 100,
+    finished: !!state.finished,
+    savedAt: Date.now(),
+  };
   try {
-    if (typeof localStorage === 'undefined') return false;
-    const mission = read(state, ['mission', 'missionIndex'], 0);
-    const missionIndex = typeof mission === 'object' && mission !== null
-      ? read(mission, ['index', 'number'], 0)
-      : mission;
-    const data = {
-      money: read(state, ['money'], 0),
-      mission: missionIndex,
-      finished: read(state, ['finished', 'storyComplete'], false) ? true : false,
-      health: read(state, ['health'], 100),
-      best: read(state, ['best', 'bestScore'], 0),
-      savedAt: Date.now(),
-    };
-    localStorage.setItem(KEY, JSON.stringify(data));
+    store.setItem(SAVE_KEY, JSON.stringify(data));
     return true;
-  } catch (err) {
+  } catch (_err) {
     return false;
   }
 }
 
-// loadGame(): read the save back, or null when nothing is saved
-// (or storage is unavailable / the data is corrupt).
 export function loadGame() {
+  const store = readStorage();
+  if (!store) return null;
+  let raw = null;
   try {
-    if (typeof localStorage === 'undefined') return null;
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return null;
+    raw = store.getItem(SAVE_KEY);
+  } catch (_err) {
+    return null;
+  }
+  if (!raw) return null;
+  try {
     const data = JSON.parse(raw);
     if (!data || typeof data !== 'object') return null;
     return {
       money: typeof data.money === 'number' ? data.money : 0,
-      mission: typeof data.mission === 'number' ? data.mission : 0,
-      finished: data.finished === true,
+      mission: typeof data.mission === 'number'
+        ? data.mission
+        : (typeof data.missionIndex === 'number' ? data.missionIndex : 0),
+      missionIndex: typeof data.missionIndex === 'number'
+        ? data.missionIndex
+        : (typeof data.mission === 'number' ? data.mission : 0),
+      bestScore: typeof data.bestScore === 'number' ? data.bestScore : 0,
       health: typeof data.health === 'number' ? data.health : 100,
-      best: typeof data.best === 'number' ? data.best : 0,
+      finished: !!data.finished,
       savedAt: typeof data.savedAt === 'number' ? data.savedAt : 0,
     };
-  } catch (err) {
+  } catch (_err) {
     return null;
+  }
+}
+
+export function clearSave() {
+  const store = readStorage();
+  if (!store) return false;
+  try {
+    store.removeItem(SAVE_KEY);
+    return true;
+  } catch (_err) {
+    return false;
   }
 }

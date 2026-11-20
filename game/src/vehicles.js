@@ -1,170 +1,189 @@
-import * as THREE from 'three';
+// vehicles.js — Velora Heat (chunk 2)
+// Low-poly cars. Built from the spec contract only:
+// makeCar(colour, kind, materials) returns a car group with body, cabin, wheels
+// and lights. Kinds: sedan, hatch, truck, police, gold (the Aurelio GT).
+// Also exports the list of available car colours.
+// THREE comes from the global loaded by index.html (./vendor/three.min.js).
 
-// Low-poly cars for Velora Heat. makeCar builds a car group facing +Z:
-// body, cabin, four wheels on steerable front pivots, headlights and
-// taillights. The group carries in userData the wheel pivots (so driving can
-// spin and steer them), the body mesh (so driving can roll it), and the
-// police light bar when the kind is police. Colours come from the shared
-// materials dictionary when it has them, with local fallbacks.
+function three() {
+  const T = globalThis.THREE;
+  if (!T) throw new Error('THREE global is not loaded — index.html must load ./vendor/three.min.js before main.js');
+  return T;
+}
 
 export const CAR_COLOURS = [
-  'coral', 'teal', 'cream', 'gold', 'red', 'blue', 'silver', 'ink', 'green', 'white',
+  'red', 'coral', 'gold', 'teal', 'cream',
+  'blue', 'white', 'black', 'silver', 'green',
 ];
-export const CAR_COLORS = CAR_COLOURS;
+// Lower-case alias — chunk 3 only knows the spec, which names no identifier,
+// so both spellings point at the same list.
+export const carColours = CAR_COLOURS;
 
-const PAINT = {
-  coral: 0xe85d4a,
-  teal: 0x2a9d8f,
-  cream: 0xf2e8d5,
-  gold: 0xd4a017,
-  red: 0xc1121f,
-  blue: 0x2b5ea7,
-  silver: 0xb8bcc2,
-  ink: 0x23232e,
-  green: 0x4a7c59,
+const PAINT_HEX = {
+  red: 0xb03030,
+  coral: 0xd96a5f,
+  gold: 0xe0a83c,
+  teal: 0x3f7d7a,
+  cream: 0xe8e0d0,
+  blue: 0x3a5a8a,
   white: 0xe8e8e8,
+  black: 0x1c1c20,
+  silver: 0x9aa0a8,
+  green: 0x4a7a4a,
 };
 
-function mat(dict, keys, color, opts = {}) {
-  const d = dict || {};
-  for (const k of keys) {
-    const m = d[k];
-    if (m && m.isMaterial) return m;
+function cap(s) {
+  return String(s).charAt(0).toUpperCase() + String(s).slice(1);
+}
+
+function mat(materials, keys, color, opts) {
+  if (materials) {
+    for (const k of keys) {
+      if (materials[k]) return materials[k];
+    }
   }
+  const THREE = three();
   return new THREE.MeshStandardMaterial({
     color,
-    roughness: 0.45,
-    metalness: 0.35,
-    ...opts,
+    roughness: 0.8,
+    metalness: 0.1,
+    ...(opts || {}),
   });
 }
 
-function paintMat(dict, colour) {
-  const name = PAINT[colour] !== undefined ? colour : 'silver';
-  const keys = [`carPaint${name[0].toUpperCase()}${name.slice(1)}`, `car_${name}`, `paint_${name}`, name, 'carPaint'];
-  return mat(dict, keys, PAINT[name], { roughness: 0.35, metalness: 0.55 });
+function paintMat(materials, colour) {
+  const name = String(colour || 'silver').toLowerCase();
+  const hex = PAINT_HEX[name] !== undefined ? PAINT_HEX[name] : 0x9aa0a8;
+  return mat(
+    materials,
+    ['carPaint' + cap(name), 'car' + cap(name), 'paint' + cap(name), name],
+    hex,
+    { metalness: 0.55, roughness: 0.35 },
+  );
 }
 
-function wheel(dict, radius, width) {
-  // A pivot group at the axle; the tyre cylinder hangs in it so driving can
-  // steer the pivot (front wheels) and spin the tyre around its axle.
-  const pivot = new THREE.Group();
-  const tyre = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius, radius, width, 14),
-    mat(dict, ['tyre', 'tire', 'wheel', 'dark'], 0x151515, { roughness: 0.9, metalness: 0.0 }),
-  );
-  tyre.rotation.z = Math.PI / 2;
-  tyre.castShadow = true;
-  pivot.add(tyre);
-  const hub = new THREE.Mesh(
-    new THREE.CylinderGeometry(radius * 0.55, radius * 0.55, width + 0.02, 10),
-    mat(dict, ['metal', 'hubcap', 'chrome'], 0x9aa0a8, { roughness: 0.3, metalness: 0.8 }),
-  );
-  hub.rotation.z = Math.PI / 2;
-  pivot.add(hub);
-  pivot.userData.tyre = tyre;
-  return pivot;
-}
+// Dimensions per kind: length (z), width (x), body height, cabin height.
+const KINDS = {
+  sedan: { length: 4.3, width: 1.9, bodyH: 0.62, cabinH: 0.55, wheels: 0.36 },
+  hatch: { length: 3.7, width: 1.8, bodyH: 0.6, cabinH: 0.55, wheels: 0.33 },
+  truck: { length: 5.8, width: 2.1, bodyH: 0.8, cabinH: 0.7, wheels: 0.42 },
+  police: { length: 4.3, width: 1.9, bodyH: 0.62, cabinH: 0.55, wheels: 0.36 },
+  gold: { length: 4.5, width: 2.0, bodyH: 0.5, cabinH: 0.48, wheels: 0.38 },
+};
 
-function lamp(dict, color, x, y, z, w = 0.22) {
-  const m = new THREE.Mesh(
-    new THREE.BoxGeometry(w, 0.1, 0.06),
-    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.9, roughness: 0.4 }),
-  );
-  m.position.set(x, y, z);
-  return m;
-}
-
-// makeCar(colour, kind, materials): kind is 'sedan' | 'hatch' | 'truck' |
-// 'police' | 'gold'. Returns a THREE.Group facing +Z. userData holds wheels
-// {frontL, frontR, rearL, rearR}, the body mesh, the kind, and (for police)
-// the lightBar {red, blue} meshes plus a flash phase.
 export function makeCar(colour, kind, materials) {
-  const k = ['sedan', 'hatch', 'truck', 'police', 'gold'].includes(kind) ? kind : 'sedan';
-  const dict = materials || {};
-  const paint = k === 'gold'
-    ? mat(dict, ['carPaintGold', 'car_gold', 'gold', 'carPaint'], PAINT.gold, { roughness: 0.25, metalness: 0.85 })
-    : paintMat(dict, colour);
-  const glass = mat(dict, ['window', 'glass', 'buildingGlass'], 0x1a2a33, { roughness: 0.15, metalness: 0.6 });
-  const trim = mat(dict, ['metal', 'chrome'], 0x8a8f96, { roughness: 0.3, metalness: 0.8 });
+  const THREE = three();
+  const k = KINDS[kind] || KINDS.sedan;
+  const kindName = KINDS[kind] ? kind : 'sedan';
+  const colourName = String(colour || 'silver').toLowerCase();
 
   const group = new THREE.Group();
-  const long = k === 'truck' ? 5.2 : k === 'hatch' ? 3.6 : 4.4;
-  const wide = k === 'truck' ? 2.1 : 1.9;
-  const bodyH = k === 'truck' ? 1.1 : 0.62;
+  group.name = 'car-' + kindName + '-' + colourName;
 
-  // Body.
-  const body = new THREE.Mesh(new THREE.BoxGeometry(wide, bodyH, long), paint);
-  body.position.y = 0.62;
+  const paint = kindName === 'police'
+    ? mat(materials, ['carPaintWhite', 'carWhite', 'white'], 0xe8e8e8, { metalness: 0.5, roughness: 0.35 })
+    : kindName === 'gold'
+      ? mat(materials, ['carPaintGold', 'carGold', 'gold'], 0xe0a83c, { metalness: 0.75, roughness: 0.25 })
+      : paintMat(materials, colourName);
+  const glass = mat(materials, ['window', 'glass', 'carGlass', 'buildingGlass'], 0x1a2a33, { metalness: 0.4, roughness: 0.15 });
+  const tyre = mat(materials, ['tyre', 'tire', 'carTyre'], 0x141414, { roughness: 0.95 });
+  const metal = mat(materials, ['metal', 'chrome'], 0xb8bcc0, { metalness: 0.9, roughness: 0.25 });
+  const lightFront = mat(materials, ['headlight', 'lamp'], 0xfff2c0, { emissive: 0xffe9a0, emissiveIntensity: 0.9 });
+  const lightRear = mat(materials, ['taillight'], 0xc02020, { emissive: 0x900000, emissiveIntensity: 0.8 });
+
+  const L = k.length;
+  const W = k.width;
+
+  // Main body: lower slab + hood/trunk shaping via a second slab.
+  const body = new THREE.Mesh(new THREE.BoxGeometry(W, k.bodyH, L), paint);
+  body.position.y = 0.55;
   body.castShadow = true;
   group.add(body);
-  // Cabin / windshield band.
-  const cabinLen = k === 'truck' ? 1.4 : long * 0.42;
-  const cabin = new THREE.Mesh(new THREE.BoxGeometry(wide * 0.86, 0.52, cabinLen), glass);
-  cabin.position.set(0, 1.12, k === 'truck' ? long / 2 - 1.0 : -0.2);
+
+  // Cabin / windshield block.
+  const cabinLen = kindName === 'truck' ? L * 0.28 : L * 0.48;
+  const cabin = new THREE.Mesh(new THREE.BoxGeometry(W * 0.82, k.cabinH, cabinLen), glass);
+  cabin.position.set(0, 0.55 + k.bodyH / 2 + k.cabinH / 2 - 0.06, kindName === 'truck' ? L * 0.28 : -L * 0.04);
   cabin.castShadow = true;
   group.add(cabin);
-  if (k === 'truck') {
-    // Flatbed with side rails behind the cab.
-    const bed = new THREE.Mesh(new THREE.BoxGeometry(wide * 0.94, 0.28, long * 0.5), trim);
-    bed.position.set(0, 0.95, -long * 0.2);
+
+  // Truck bed: open cargo box behind the cab.
+  if (kindName === 'truck') {
+    const bed = new THREE.Mesh(new THREE.BoxGeometry(W * 0.92, 0.35, L * 0.5), paint);
+    bed.position.set(0, 0.55 + k.bodyH / 2 + 0.1, -L * 0.22);
     bed.castShadow = true;
     group.add(bed);
   }
-  // Bumpers.
-  for (const z of [long / 2 + 0.02, -long / 2 - 0.02]) {
-    const bumper = new THREE.Mesh(new THREE.BoxGeometry(wide * 0.98, 0.16, 0.1), trim);
-    bumper.position.set(0, 0.42, z);
-    group.add(bumper);
+
+  // Wheels: cylinders with axis along X. Front pair steers (userData tracks it).
+  const wheels = [];
+  const wheelGeo = new THREE.CylinderGeometry(k.wheels, k.wheels, 0.24, 14);
+  wheelGeo.rotateZ(Math.PI / 2);
+  const wx = W / 2 - 0.08;
+  const wz = L / 2 - 0.85;
+  const positions = [
+    [-wx, wz, 'front-left'], [wx, wz, 'front-right'],
+    [-wx, -wz, 'rear-left'], [wx, -wz, 'rear-right'],
+  ];
+  for (const [x, z, label] of positions) {
+    const wheel = new THREE.Mesh(wheelGeo, tyre);
+    wheel.position.set(x, k.wheels, z);
+    wheel.castShadow = true;
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(k.wheels * 0.45, k.wheels * 0.45, 0.26, 10), metal);
+    hub.geometry.rotateZ(Math.PI / 2);
+    wheel.add(hub);
+    wheel.userData.steer = label.startsWith('front');
+    group.add(wheel);
+    wheels.push(wheel);
   }
-  // Headlights (front, +Z) and taillights (rear, -Z).
-  group.add(lamp(dict, 0xfff2c0, -wide / 2 + 0.3, 0.68, long / 2 + 0.03));
-  group.add(lamp(dict, 0xfff2c0, wide / 2 - 0.3, 0.68, long / 2 + 0.03));
-  group.add(lamp(dict, 0xff2a1a, -wide / 2 + 0.3, 0.68, -long / 2 - 0.03));
-  group.add(lamp(dict, 0xff2a1a, wide / 2 - 0.3, 0.68, -long / 2 - 0.03));
 
-  // Wheels: front pair steers, all four spin.
-  const wheelR = k === 'truck' ? 0.44 : 0.36;
-  const wheelW = 0.26;
-  const frontZ = long / 2 - 0.85;
-  const rearZ = -long / 2 + 0.85;
-  const frontL = wheel(dict, wheelR, wheelW);
-  frontL.position.set(-wide / 2, wheelR, frontZ);
-  const frontR = wheel(dict, wheelR, wheelW);
-  frontR.position.set(wide / 2, wheelR, frontZ);
-  const rearL = wheel(dict, wheelR, wheelW);
-  rearL.position.set(-wide / 2, wheelR, rearZ);
-  const rearR = wheel(dict, wheelR, wheelW);
-  rearR.position.set(wide / 2, wheelR, rearZ);
-  group.add(frontL, frontR, rearL, rearR);
+  // Headlights (front, +Z) and taillights (rear, -Z). Car faces +Z.
+  const lampGeo = new THREE.BoxGeometry(0.34, 0.14, 0.06);
+  for (const x of [-W / 2 + 0.32, W / 2 - 0.32]) {
+    const hl = new THREE.Mesh(lampGeo, lightFront);
+    hl.position.set(x, 0.62, L / 2 + 0.01);
+    group.add(hl);
+    const tl = new THREE.Mesh(lampGeo, lightRear);
+    tl.position.set(x, 0.62, -L / 2 - 0.01);
+    group.add(tl);
+  }
 
+  // Police light bar: red left, blue right, flashed by the police system.
   let lightBar = null;
-  if (k === 'police') {
-    // Roof light bar: red on the left, blue on the right.
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.12, 0.3), trim);
-    bar.position.set(0, 1.46, -0.2);
-    group.add(bar);
-    const red = new THREE.Mesh(
-      new THREE.BoxGeometry(0.5, 0.14, 0.32),
-      new THREE.MeshStandardMaterial({ color: 0xff2020, emissive: 0xff2020, emissiveIntensity: 1.6 }),
-    );
-    red.position.set(-0.28, 1.46, -0.2);
-    const blue = new THREE.Mesh(
-      new THREE.BoxGeometry(0.5, 0.14, 0.32),
-      new THREE.MeshStandardMaterial({ color: 0x2040ff, emissive: 0x2040ff, emissiveIntensity: 1.6 }),
-    );
-    blue.position.set(0.28, 1.46, -0.2);
+  if (kindName === 'police') {
+    const barBase = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.08, 0.3), metal);
+    barBase.position.set(0, 0.55 + k.bodyH / 2 + k.cabinH + 0.02, -L * 0.04);
+    group.add(barBase);
+    const redMat = new THREE.MeshStandardMaterial({ color: 0xd02020, emissive: 0xd02020, emissiveIntensity: 1 });
+    const blueMat = new THREE.MeshStandardMaterial({ color: 0x2040d0, emissive: 0x2040d0, emissiveIntensity: 1 });
+    const red = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.12, 0.26), redMat);
+    red.position.set(-0.22, 0.55 + k.bodyH / 2 + k.cabinH + 0.08, -L * 0.04);
+    const blue = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.12, 0.26), blueMat);
+    blue.position.set(0.22, 0.55 + k.bodyH / 2 + k.cabinH + 0.08, -L * 0.04);
     group.add(red, blue);
-    lightBar = { red, blue, phase: 0 };
+    lightBar = { red, blue, redMat, blueMat };
+    // Black-and-white doors: dark stripe along the body.
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(W + 0.02, 0.2, L * 0.7), mat(materials, ['policeStripe'], 0x1c1c20, { roughness: 0.6 }));
+    stripe.position.y = 0.55;
+    group.add(stripe);
   }
 
-  group.userData.kind = k;
-  group.userData.colour = k === 'gold' ? 'gold' : colour;
-  group.userData.wheels = { frontL, frontR, rearL, rearR };
-  group.userData.body = body;
-  group.userData.length = long;
-  group.userData.width = wide;
-  group.userData.wheelRadius = wheelR;
+  // Gold Aurelio GT: low spoiler and gold trim.
+  if (kindName === 'gold') {
+    const spoiler = new THREE.Mesh(new THREE.BoxGeometry(W * 0.9, 0.06, 0.3), metal);
+    spoiler.position.set(0, 0.95, -L / 2 + 0.15);
+    group.add(spoiler);
+  }
+
+  group.userData.kind = kindName;
+  group.userData.colour = colourName;
+  group.userData.wheels = wheels;
   group.userData.lightBar = lightBar;
+  group.userData.length = L;
+  group.userData.width = W;
+  group.userData.wheelRadius = k.wheels;
+  // Facing: +Z at rotation.y = 0. Forward vector is (sin ry, 0, cos ry).
+  group.userData.forward = { x: 0, z: 1 };
+
   return group;
 }

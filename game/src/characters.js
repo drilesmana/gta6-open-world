@@ -1,138 +1,128 @@
-import * as THREE from 'three';
+// characters.js — Velora Heat (chunk 2)
+// Low-poly people for pedestrians and the player. Built from the spec contract
+// only: makePerson(variant, materials) returns a person group (body, head, legs,
+// arms) whose walk swing the pedestrian / player systems drive via
+// group.userData.applyWalk(phase, amount).
+// THREE comes from the global loaded by index.html (./vendor/three.min.js).
 
-// Low-poly people for Velora Heat. A person is a small group: torso, head, two
-// legs pivoted at the hip and two arms pivoted at the shoulder, so the walk
-// swing can rotate the limbs around their joints. The pedestrian system and
-// the player drive the swing with swingWalk(); the root group's position is
-// owned by whoever spawns the person, and the swing only touches the inner
-// rig so it never fights the owner's positioning.
+function three() {
+  const T = globalThis.THREE;
+  if (!T) throw new Error('THREE global is not loaded — index.html must load ./vendor/three.min.js before main.js');
+  return T;
+}
 
-function mat(dict, keys, color, opts = {}) {
-  const d = dict || {};
-  for (const k of keys) {
-    const m = d[k];
-    if (m && m.isMaterial) return m;
+// Fallback material when the shared dictionary has no matching key.
+function mat(materials, keys, color, opts) {
+  if (materials) {
+    for (const k of keys) {
+      if (materials[k]) return materials[k];
+    }
   }
+  const THREE = three();
   return new THREE.MeshStandardMaterial({
     color,
     roughness: 0.85,
     metalness: 0.0,
-    ...opts,
+    ...(opts || {}),
   });
 }
 
-const SKIN = [0xd9a066, 0xc98d5a, 0x8a5a3b, 0xe8b98a];
-const HAIR = [0x2a1c12, 0x111111, 0x5a3a1a, 0x777777];
-const SHIRTS = {
-  dario: 0xe85d4a,
-  nia: 0x2a9d8f,
-  police: 0x1f2a44,
-  pedestrian: 0xdddddd,
-};
-const PED_SHIRTS = [0xe9c46a, 0xf4a261, 0x2a9d8f, 0x8ab17d, 0xe07a5f, 0x6d9dc5, 0xbc6c25, 0x90a955];
-const PANTS = {
-  dario: 0x23232e,
-  nia: 0x3a3a4a,
-  police: 0x141824,
-  pedestrian: 0x4a4a55,
-};
+// Skin tones and shirt colours cycled for crowd variety.
+const SKINS = [0xc9997a, 0xa9745a, 0xd9a986, 0x8a5a3d, 0xe8b98f];
+const SHIRTS = [0xe8e0d0, 0xd96a5f, 0x3f7d7a, 0xe0a83c, 0x5a6b8a, 0x7a9a5a, 0xc96a9a, 0x8a5a7a];
+const PANTS = [0x2e3440, 0x4a3a30, 0x3a4a5a, 0x5a5a5a, 0x2a3a2a];
 
-function limb(width, length, material, pivotY) {
-  // A pivot group at the joint; the visible box hangs below it so rotating
-  // the pivot swings the limb around the joint instead of its centre.
-  const pivot = new THREE.Group();
-  pivot.position.y = pivotY;
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, length, width), material);
-  mesh.position.y = -length / 2;
-  mesh.castShadow = true;
-  pivot.add(mesh);
-  return pivot;
+// Deterministic small hash so a variant name always maps to the same look.
+function hashName(name) {
+  let h = 0;
+  const s = String(name || 'walker');
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return h;
 }
 
-// makePerson(variant, materials): variant is 'dario' | 'nia' | 'police' |
-// 'pedestrian'. Returns a THREE.Group with the person. The group carries in
-// userData: variant, the four limb pivots (legL, legR, armL, armR), the rig
-// group that bobs while walking, and the person's height.
 export function makePerson(variant, materials) {
-  const v = SHIRTS[variant] !== undefined ? variant : 'pedestrian';
-  const skin = mat(materials, ['skin', 'personSkin'], SKIN[Math.floor(Math.random() * SKIN.length)]);
-  const hair = mat(materials, ['hair', 'personHair'], HAIR[Math.floor(Math.random() * HAIR.length)]);
-  const shirtColor = v === 'pedestrian'
-    ? PED_SHIRTS[Math.floor(Math.random() * PED_SHIRTS.length)]
-    : SHIRTS[v];
-  const shirt = mat(materials, ['shirt', 'cloth', 'clothing'], shirtColor);
-  const pants = mat(materials, ['pants', 'trousers', 'cloth'], PANTS[v]);
-  const shoe = mat(materials, ['shoe', 'tyre', 'dark'], 0x1a1a1a);
+  const THREE = three();
+  const h = hashName(variant);
+  const name = String(variant || 'walker').toLowerCase();
+
+  // Dario, the player: coral jacket, dark trousers, taller stance.
+  // Nia: teal top. Everyone else cycles the crowd palette by name hash.
+  let shirt = SHIRTS[h % SHIRTS.length];
+  let pants = PANTS[(h >> 3) % PANTS.length];
+  let skin = SKINS[(h >> 5) % SKINS.length];
+  let scale = 1;
+  if (name === 'dario') {
+    shirt = 0xd96a5f; // coral jacket
+    pants = 0x2e3440;
+    skin = 0xc9997a;
+    scale = 1.02;
+  } else if (name === 'nia') {
+    shirt = 0x3f7d7a; // teal top
+    pants = 0x2e3440;
+    skin = 0xd9a986;
+    scale = 0.96;
+  }
+
+  const skinMat = mat(materials, ['skin', 'personSkin'], skin);
+  const shirtMat = mat(materials, ['shirt', 'personShirt', 'cloth'], shirt);
+  const pantsMat = mat(materials, ['pants', 'personPants', 'clothDark'], pants);
+  const hairMat = mat(materials, ['hair', 'personHair'], 0x241a12, { roughness: 0.95 });
 
   const group = new THREE.Group();
-  const rig = new THREE.Group();
-  group.add(rig);
+  group.name = 'person-' + name;
 
-  // Torso.
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.46, 0.62, 0.26), shirt);
-  torso.position.y = 1.18;
-  torso.castShadow = true;
-  rig.add(torso);
+  // Legs pivot at the hip so the swing rotates around the top of the leg.
+  function limb(w, len, material, x, y) {
+    const pivot = new THREE.Group();
+    pivot.position.set(x, y, 0);
+    const geo = new THREE.BoxGeometry(w, len, w * 0.9);
+    geo.translate(0, -len / 2, 0); // hang below the pivot
+    const mesh = new THREE.Mesh(geo, material);
+    mesh.castShadow = true;
+    pivot.add(mesh);
+    return pivot;
+  }
 
-  // Head + hair cap.
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.28), skin);
-  head.position.y = 1.66;
+  const leftLeg = limb(0.17, 0.52, pantsMat, -0.11, 0.78);
+  const rightLeg = limb(0.17, 0.52, pantsMat, 0.11, 0.78);
+  const leftArm = limb(0.12, 0.5, shirtMat, -0.29, 1.32);
+  const rightArm = limb(0.12, 0.5, shirtMat, 0.29, 1.32);
+
+  const bodyGeo = new THREE.BoxGeometry(0.46, 0.58, 0.26);
+  const body = new THREE.Mesh(bodyGeo, shirtMat);
+  body.position.y = 1.07;
+  body.castShadow = true;
+
+  const headGeo = new THREE.BoxGeometry(0.27, 0.28, 0.26);
+  const head = new THREE.Mesh(headGeo, skinMat);
+  head.position.y = 1.52;
   head.castShadow = true;
-  rig.add(head);
-  const cap = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.1, 0.3), hair);
-  cap.position.y = 1.83;
-  rig.add(cap);
-  if (v === 'police') {
-    // Flat police cap brim.
-    const brim = new THREE.Mesh(
-      new THREE.BoxGeometry(0.34, 0.04, 0.4),
-      mat(materials, ['policeCap', 'dark'], 0x10131f),
-    );
-    brim.position.y = 1.8;
-    rig.add(brim);
+
+  const hairGeo = new THREE.BoxGeometry(0.29, 0.1, 0.28);
+  const hair = new THREE.Mesh(hairGeo, hairMat);
+  hair.position.y = 1.68;
+  hair.castShadow = true;
+
+  group.add(leftLeg, rightLeg, leftArm, rightArm, body, head, hair);
+  group.scale.setScalar(scale);
+
+  // Walk swing: phase advances with distance walked; amount 0..1 fades it in/out.
+  // Legs swing opposite, arms counter-swing. Called by pedestrians / player.
+  function applyWalk(phase, amount) {
+    const a = amount === undefined ? 1 : amount;
+    const swing = Math.sin(phase) * 0.55 * a;
+    leftLeg.rotation.x = swing;
+    rightLeg.rotation.x = -swing;
+    leftArm.rotation.x = -swing * 0.8;
+    rightArm.rotation.x = swing * 0.8;
   }
 
-  // Legs pivoted at the hip (y ~0.92), arms pivoted at the shoulder (y ~1.42).
-  const legL = limb(0.16, 0.88, pants, 0.92);
-  legL.position.x = -0.12;
-  const legR = limb(0.16, 0.88, pants, 0.92);
-  legR.position.x = 0.12;
-  const armL = limb(0.12, 0.62, shirt, 1.42);
-  armL.position.x = -0.3;
-  const armR = limb(0.12, 0.62, shirt, 1.42);
-  armR.position.x = 0.3;
-  // Shoes at the bottom of each leg.
-  for (const leg of [legL, legR]) {
-    const foot = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.08, 0.3), shoe);
-    foot.position.set(0, -0.9, 0.05);
-    leg.add(foot);
-  }
-  rig.add(legL, legR, armL, armR);
+  group.userData.limbs = { leftLeg, rightLeg, leftArm, rightArm };
+  group.userData.body = body;
+  group.userData.head = head;
+  group.userData.applyWalk = applyWalk;
+  group.userData.variant = name;
+  group.userData.walkPhase = 0;
 
-  group.userData.variant = v;
-  group.userData.legL = legL;
-  group.userData.legR = legR;
-  group.userData.armL = armL;
-  group.userData.armR = armR;
-  group.userData.rig = rig;
-  group.userData.height = 1.88;
-  group.userData.baseY = 0;
   return group;
-}
-
-// swingWalk(person, phase, amp): drive the walk cycle. phase advances with
-// distance walked; amp is the swing size in radians (0 = standing still).
-// Legs counter-swing, arms swing opposite to the legs, and the rig bobs a
-// touch so the walk reads as a walk instead of a slide.
-export function swingWalk(person, phase, amp = 0.55) {
-  const u = person.userData;
-  if (!u.legL || !u.legR || !u.armL || !u.armR) return;
-  const s = Math.sin(phase);
-  u.legL.rotation.x = s * amp;
-  u.legR.rotation.x = -s * amp;
-  u.armL.rotation.x = -s * amp * 0.7;
-  u.armR.rotation.x = s * amp * 0.7;
-  if (u.rig) {
-    u.rig.position.y = Math.abs(Math.cos(phase)) * 0.035 * Math.min(amp / 0.55, 1);
-  }
 }

@@ -1,391 +1,247 @@
-// Velora Heat — the city of Velora. A grid of roads and blocks with varied
-// buildings, sidewalks, lamps, trees and street props, plus the bay at the
-// south edge. Returns the road network, sidewalk waypoints, car spawn points
-// and the player start so the other systems can drive on it.
-
-import * as THREE from 'three';
+// Velora Heat — the coastal city: road grid, blocks, buildings, lamps, props.
+// Returns { roads, sidewalks, carSpawns, playerStart }.
+import * as THREE from '../vendor/three.min.js';
 import { CONFIG } from './config.js';
-import { rand, randInt, pick, clamp } from './util.js';
+import { rand, randInt, pick } from './util.js';
 
-// A canvas texture of lit and dark windows on a pale wall. Cloned per
-// building so each one can tile the windows to its own size.
-function makeWindowTexture() {
+function makeWindowTexture(base, lit) {
   const canvas = document.createElement('canvas');
   canvas.width = 128;
   canvas.height = 256;
   const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#f2ede2';
+  ctx.fillStyle = base;
   ctx.fillRect(0, 0, 128, 256);
   const cols = 4;
   const rows = 8;
-  const cw = 128 / cols;
-  const ch = 256 / rows;
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      const lit = Math.random() < 0.3;
-      ctx.fillStyle = lit ? '#ffd27a' : '#2c3e50';
-      ctx.fillRect(c * cw + 6, r * ch + 8, cw - 12, ch - 16);
+      const x = 10 + c * 28;
+      const y = 12 + r * 30;
+      const isLit = Math.random() < 0.3;
+      ctx.fillStyle = isLit ? lit : '#22384a';
+      ctx.fillRect(x, y, 18, 20);
     }
   }
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = THREE.RepeatWrapping;
-  tex.wrapT = THREE.RepeatWrapping;
   return tex;
 }
 
-// Build the city into the scene. materials is the dictionary from
-// makeMaterials(). Returns the city object the gameplay systems use.
 export function createCity(scene, materials) {
-  const c = CONFIG.city;
-  const p = CONFIG.palette;
+  const half = CONFIG.citySize / 2; // 320
+  const pitch = CONFIG.blockGap;    // 76
+  const roadW = CONFIG.roadWidth;   // 12
+  const walkW = CONFIG.sidewalkWidth;
+
+  // Road centre lines, symmetric, spacing = pitch.
+  const lines = [];
+  for (let i = 0; i < 8; i++) lines.push(-266 + i * pitch);
+
   const group = new THREE.Group();
   scene.add(group);
 
-  const pitch = c.blockSize + c.roadWidth; // distance between road centrelines
-  const half = 2 * pitch + c.roadWidth / 2; // city half-extent
-  const roadLines = [-2 * pitch, -pitch, 0, pitch, 2 * pitch];
-  const blockCentres = [-1.5 * pitch, -0.5 * pitch, 0.5 * pitch, 1.5 * pitch];
-
-  // --- Ground, sea and sand -------------------------------------------
+  // Base ground: warm dry grass.
   const ground = new THREE.Mesh(
-    new THREE.PlaneGeometry(half * 2 + 260, half * 2 + 260),
-    materials.ground,
+    new THREE.PlaneGeometry(CONFIG.citySize + 160, CONFIG.citySize + 160),
+    materials.grass,
   );
   ground.rotation.x = -Math.PI / 2;
-  ground.position.set(0, -0.05, 0);
   ground.receiveShadow = true;
   group.add(ground);
 
-  const sea = new THREE.Mesh(new THREE.PlaneGeometry(900, 320), materials.sea);
+  // Sea to the south (coast) and a sand strip.
+  const sea = new THREE.Mesh(
+    new THREE.PlaneGeometry(1200, 260),
+    new THREE.MeshStandardMaterial({ color: 0x2a7a8c, roughness: 0.25, metalness: 0.2 }),
+  );
   sea.rotation.x = -Math.PI / 2;
-  sea.position.set(0, -0.12, half + 170);
-  sea.receiveShadow = true;
+  sea.position.set(0, -0.6, half + 150);
   group.add(sea);
-
-  const sand = new THREE.Mesh(new THREE.PlaneGeometry(half * 2 + 60, 16), materials.sand);
-  sand.rotation.x = -Math.PI / 2;
-  sand.position.set(0, -0.08, half + 8);
-  sand.receiveShadow = true;
-  group.add(sand);
-
-  // --- Road strips ------------------------------------------------------
-  const roadGeoV = new THREE.BoxGeometry(c.roadWidth, 0.1, half * 2);
-  const roadGeoH = new THREE.BoxGeometry(half * 2, 0.1, c.roadWidth);
-  for (const x of roadLines) {
-    const road = new THREE.Mesh(roadGeoV, materials.asphalt);
-    road.position.set(x, 0.02, 0);
-    road.receiveShadow = true;
-    group.add(road);
-  }
-  for (const z of roadLines) {
-    const road = new THREE.Mesh(roadGeoH, materials.asphalt);
-    road.position.set(0, 0.02, z);
-    road.receiveShadow = true;
-    group.add(road);
-  }
-
-  // --- Centre dashes and crosswalks (instanced, one draw call each) -----
-  const dummy = new THREE.Object3D();
-  const dashPositions = [];
-  for (const line of roadLines) {
-    for (let d = -half + 10; d < half - 10; d += 7) {
-      const nearCross = roadLines.some((r) => Math.abs(d - r) < 9);
-      if (nearCross) continue;
-      dashPositions.push({ x: line, z: d, rotY: 0 });
-      dashPositions.push({ x: d, z: line, rotY: Math.PI / 2 });
-    }
-  }
-  const dashes = new THREE.InstancedMesh(
-    new THREE.BoxGeometry(0.22, 0.04, 2.6),
-    materials.roadLine,
-    dashPositions.length,
+  const beach = new THREE.Mesh(
+    new THREE.PlaneGeometry(CONFIG.citySize + 160, 40),
+    materials.sand,
   );
-  dashPositions.forEach((pos, i) => {
-    dummy.position.set(pos.x, 0.09, pos.z);
-    dummy.rotation.set(0, pos.rotY, 0);
-    dummy.updateMatrix();
-    dashes.setMatrixAt(i, dummy.matrix);
-  });
-  dashes.instanceMatrix.needsUpdate = true;
-  dashes.frustumCulled = false;
-  group.add(dashes);
+  beach.rotation.x = -Math.PI / 2;
+  beach.position.set(0, 0.02, half + 20);
+  beach.receiveShadow = true;
+  group.add(beach);
 
-  const stripePositions = [];
-  for (const rx of roadLines) {
-    for (const rz of roadLines) {
-      for (const side of [-1, 1]) {
-        const cz = rz + side * (c.roadWidth / 2 + 2.2);
-        for (let k = -2; k <= 2; k++) {
-          stripePositions.push({ x: rx + k * 1.5, z: cz, rotY: 0 });
-        }
-        const cx = rx + side * (c.roadWidth / 2 + 2.2);
-        for (let k = -2; k <= 2; k++) {
-          stripePositions.push({ x: cx, z: rz + k * 1.5, rotY: Math.PI / 2 });
-        }
-      }
-    }
-  }
-  const stripes = new THREE.InstancedMesh(
-    new THREE.BoxGeometry(0.65, 0.04, 3.4),
-    materials.crosswalk,
-    stripePositions.length,
-  );
-  stripePositions.forEach((pos, i) => {
-    dummy.position.set(pos.x, 0.09, pos.z);
-    dummy.rotation.set(0, pos.rotY, 0);
-    dummy.updateMatrix();
-    stripes.setMatrixAt(i, dummy.matrix);
-  });
-  stripes.instanceMatrix.needsUpdate = true;
-  stripes.frustumCulled = false;
-  group.add(stripes);
-
-  // --- Sidewalk slabs ---------------------------------------------------
-  const slabSize = c.blockSize + c.sidewalkWidth * 2;
-  const slabGeo = new THREE.BoxGeometry(slabSize, 0.24, slabSize);
-  for (const bx of blockCentres) {
-    for (const bz of blockCentres) {
-      const slab = new THREE.Mesh(slabGeo, materials.sidewalk);
-      slab.position.set(bx, 0.12, bz);
-      slab.receiveShadow = true;
-      group.add(slab);
-    }
-  }
-
-  // --- Buildings --------------------------------------------------------
-  const windowTex = makeWindowTexture();
-  const unitBox = new THREE.BoxGeometry(1, 1, 1);
-  const wallTints = [
-    0xe8dcc0,
-    0xc97e5a,
-    0x4d8a86,
-    0xd9b380,
-    0x5a6672,
-  ];
-  const garageBlockX = 0.5 * pitch; // south-centre block holds Nia's garage
-  const garageBlockZ = 1.5 * pitch;
-  const garage = CONFIG.garage;
-
-  function addBuilding(x, z, w, h, d, tint) {
-    const tex = windowTex.clone();
-    tex.needsUpdate = true;
-    tex.repeat.set(Math.max(1, Math.round(w / 7)), Math.max(1, Math.round(h / 7)));
-    const wall = new THREE.MeshStandardMaterial({
-      map: tex,
-      color: tint,
-      roughness: 0.9,
-      metalness: 0.0,
-    });
-    const mesh = new THREE.Mesh(unitBox, [
-      wall, wall, materials.roof, materials.roof, wall, wall,
-    ]);
-    mesh.scale.set(w, h, d);
-    mesh.position.set(x, 0.24 + h / 2, z);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    group.add(mesh);
-    return mesh;
-  }
-
-  for (const bx of blockCentres) {
-    for (const bz of blockCentres) {
-      const isGarageBlock = bx === garageBlockX && bz === garageBlockZ;
-      const lot = (c.blockSize - c.buildingGap) / 2;
-      for (const ox of [-lot / 2, lot / 2]) {
-        for (const oz of [-lot / 2, lot / 2]) {
-          // The garage takes the two south lots of its block.
-          if (isGarageBlock && oz > 0) continue;
-          if (Math.random() < 0.22) continue; // leave some lots empty
-          const w = rand(12, lot - 2);
-          const d = rand(12, lot - 2);
-          const h = rand(c.minBuildingHeight, c.maxBuildingHeight);
-          addBuilding(bx + ox, bz + oz, w, h, d, pick(wallTints));
-        }
-      }
-    }
-  }
-
-  // Nia's garage: a wide low building with a door facing north, gold sign.
-  const garageMesh = new THREE.Mesh(unitBox, [
-    materials.buildingWallTeal,
-    materials.buildingWallTeal,
-    materials.roof,
-    materials.roof,
-    materials.buildingWallTeal,
-    materials.buildingWallTeal,
-  ]);
-  garageMesh.scale.set(18, 7, 9);
-  garageMesh.position.set(garage.x, 0.24 + 3.5, garage.z);
-  garageMesh.castShadow = true;
-  garageMesh.receiveShadow = true;
-  group.add(garageMesh);
-  const door = new THREE.Mesh(
-    new THREE.BoxGeometry(garage.doorWidth, 4.6, 0.3),
-    materials.garageDoor,
-  );
-  door.position.set(garage.x, 0.24 + 2.3, garage.z - 4.6);
-  group.add(door);
-  const sign = new THREE.Mesh(
-    new THREE.BoxGeometry(10, 1.4, 0.3),
-    materials.garageSign,
-  );
-  sign.position.set(garage.x, 0.24 + 6.2, garage.z - 4.6);
-  group.add(sign);
-
-  // --- Lamps, trees, benches, hydrants (instanced) ----------------------
-  const lampSpots = [];
-  for (const rx of roadLines) {
-    for (const rz of roadLines) {
-      lampSpots.push({ x: rx + c.roadWidth / 2 + 1.2, z: rz + c.roadWidth / 2 + 1.2 });
-      lampSpots.push({ x: rx - c.roadWidth / 2 - 1.2, z: rz - c.roadWidth / 2 - 1.2 });
-    }
-  }
-  const poles = new THREE.InstancedMesh(
-    new THREE.CylinderGeometry(0.09, 0.12, 5.2, 8),
-    materials.lampPole,
-    lampSpots.length,
-  );
-  const heads = new THREE.InstancedMesh(
-    new THREE.BoxGeometry(0.7, 0.25, 0.35),
-    materials.lampGlow,
-    lampSpots.length,
-  );
-  lampSpots.forEach((pos, i) => {
-    dummy.position.set(pos.x, 0.24 + 2.6, pos.z);
-    dummy.rotation.set(0, 0, 0);
-    dummy.updateMatrix();
-    poles.setMatrixAt(i, dummy.matrix);
-    dummy.position.set(pos.x, 0.24 + 5.3, pos.z);
-    dummy.updateMatrix();
-    heads.setMatrixAt(i, dummy.matrix);
-  });
-  poles.instanceMatrix.needsUpdate = true;
-  heads.instanceMatrix.needsUpdate = true;
-  poles.frustumCulled = false;
-  heads.frustumCulled = false;
-  poles.castShadow = true;
-  group.add(poles);
-  group.add(heads);
-
-  const treeSpots = [];
-  for (let i = 0; i < 16; i++) {
-    const bx = pick(blockCentres);
-    const bz = pick(blockCentres);
-    treeSpots.push({
-      x: bx + rand(-slabSize / 2 + 3, slabSize / 2 - 3),
-      z: bz + rand(-slabSize / 2 + 3, slabSize / 2 - 3),
-    });
-  }
-  const trunks = new THREE.InstancedMesh(
-    new THREE.CylinderGeometry(0.16, 0.22, 1.8, 7),
-    materials.treeTrunk,
-    treeSpots.length,
-  );
-  const leaves = new THREE.InstancedMesh(
-    new THREE.ConeGeometry(1.5, 3.4, 8),
-    materials.treeLeaf,
-    treeSpots.length,
-  );
-  treeSpots.forEach((pos, i) => {
-    dummy.position.set(pos.x, 0.24 + 0.9, pos.z);
-    dummy.rotation.set(0, 0, 0);
-    dummy.updateMatrix();
-    trunks.setMatrixAt(i, dummy.matrix);
-    dummy.position.set(pos.x, 0.24 + 3.2, pos.z);
-    dummy.updateMatrix();
-    leaves.setMatrixAt(i, dummy.matrix);
-  });
-  trunks.instanceMatrix.needsUpdate = true;
-  leaves.instanceMatrix.needsUpdate = true;
-  trunks.frustumCulled = false;
-  leaves.frustumCulled = false;
-  trunks.castShadow = true;
-  leaves.castShadow = true;
-  group.add(trunks);
-  group.add(leaves);
-
-  const benchSpots = [];
-  for (let i = 0; i < 10; i++) {
-    const bx = pick(blockCentres);
-    const bz = pick(blockCentres);
-    benchSpots.push({
-      x: bx + rand(-slabSize / 2 + 2, slabSize / 2 - 2),
-      z: bz + rand(-slabSize / 2 + 2, slabSize / 2 - 2),
-      rotY: pick([0, Math.PI / 2]),
-    });
-  }
-  const benches = new THREE.InstancedMesh(
-    new THREE.BoxGeometry(2.2, 0.5, 0.7),
-    materials.benchWood,
-    benchSpots.length,
-  );
-  benchSpots.forEach((pos, i) => {
-    dummy.position.set(pos.x, 0.24 + 0.45, pos.z);
-    dummy.rotation.set(0, pos.rotY, 0);
-    dummy.updateMatrix();
-    benches.setMatrixAt(i, dummy.matrix);
-  });
-  benches.instanceMatrix.needsUpdate = true;
-  benches.frustumCulled = false;
-  benches.castShadow = true;
-  group.add(benches);
-
-  // --- Road network, waypoints and spawns for the gameplay systems -----
+  // Roads: dark strips along every grid line, both directions.
   const roads = [];
-  for (const x of roadLines) {
+  const roadGeoX = new THREE.BoxGeometry(CONFIG.citySize, 0.1, roadW);
+  const roadGeoZ = new THREE.BoxGeometry(roadW, 0.1, CONFIG.citySize);
+  for (const l of lines) {
+    const rx = new THREE.Mesh(roadGeoX, materials.asphalt);
+    rx.position.set(0, 0.05, l);
+    rx.receiveShadow = true;
+    group.add(rx);
+    const rz = new THREE.Mesh(roadGeoZ, materials.asphalt);
+    rz.position.set(l, 0.05, 0);
+    rz.receiveShadow = true;
+    group.add(rz);
     roads.push({
-      start: { x, z: -half },
-      end: { x, z: half },
-      dir: { x: 0, z: 1 },
+      start: new THREE.Vector3(-half, 0, l),
+      end: new THREE.Vector3(half, 0, l),
+      dir: 'x',
     });
-  }
-  for (const z of roadLines) {
     roads.push({
-      start: { x: -half, z },
-      end: { x: half, z },
-      dir: { x: 1, z: 0 },
+      start: new THREE.Vector3(l, 0, -half),
+      end: new THREE.Vector3(l, 0, half),
+      dir: 'z',
     });
   }
 
+  // Sidewalks: lighter strips flanking each road, plus waypoint list.
   const sidewalks = [];
-  for (const bx of blockCentres) {
-    for (const bz of blockCentres) {
-      const edge = slabSize / 2 - 1.2;
-      for (let d = -edge; d <= edge; d += 8) {
-        sidewalks.push({ x: bx + d, z: bz - edge });
-        sidewalks.push({ x: bx + d, z: bz + edge });
-        sidewalks.push({ x: bx - edge, z: bz + d });
-        sidewalks.push({ x: bx + edge, z: bz + d });
+  const walkGeoX = new THREE.BoxGeometry(CONFIG.citySize, 0.12, walkW);
+  const walkGeoZ = new THREE.BoxGeometry(walkW, 0.12, CONFIG.citySize);
+  const off = roadW / 2 + walkW / 2;
+  for (const l of lines) {
+    for (const s of [-off, off]) {
+      const wx = new THREE.Mesh(walkGeoX, materials.sidewalk);
+      wx.position.set(0, 0.06, l + s);
+      wx.receiveShadow = true;
+      group.add(wx);
+      const wz = new THREE.Mesh(walkGeoZ, materials.sidewalk);
+      wz.position.set(l + s, 0.06, 0);
+      wz.receiveShadow = true;
+      group.add(wz);
+    }
+    // Waypoints every ~40 m along both sidewalks of this line.
+    for (let t = -half + 20; t <= half - 20; t += 40) {
+      sidewalks.push(new THREE.Vector3(t, 0, l - off));
+      sidewalks.push(new THREE.Vector3(t, 0, l + off));
+      sidewalks.push(new THREE.Vector3(l - off, 0, t));
+      sidewalks.push(new THREE.Vector3(l + off, 0, t));
+    }
+  }
+
+  // Building window textures (two warm variants).
+  const winTexA = makeWindowTexture('#e8dcc8', '#ffd27a');
+  const winTexB = makeWindowTexture('#e0b98f', '#ffcf8a');
+  const wallMats = [materials.wall, materials.wallWarm, materials.wallWhite, materials.wallTeal];
+  const winMats = [winTexA, winTexB].map(
+    (t) => new THREE.MeshStandardMaterial({ map: t, roughness: 0.85 }),
+  );
+
+  // Blocks: between road lines, 1–3 buildings each with varied heights.
+  const blockCentres = [];
+  for (let i = 0; i < 7; i++) {
+    for (let j = 0; j < 7; j++) {
+      blockCentres.push(-228 + i * pitch, -228 + j * pitch);
+    }
+  }
+  // Keep the garage block (centre block, near origin) mostly open.
+  const garageBlock = { x: 0, z: 0 };
+  for (let b = 0; b < blockCentres.length; b += 2) {
+    const cx = blockCentres[b];
+    const cz = blockCentres[b + 1];
+    if (Math.abs(cx - garageBlock.x) < pitch / 2 && Math.abs(cz - garageBlock.z) < pitch / 2) {
+      continue;
+    }
+    const count = randInt(1, 3);
+    for (let k = 0; k < count; k++) {
+      const w = rand(14, 26);
+      const d = rand(14, 26);
+      const h = rand(10, 42);
+      const bx = cx + rand(-16, 16);
+      const bz = cz + rand(-16, 16);
+      const wallMat = pick(wallMats);
+      const winMat = pick(winMats);
+      const mats = [winMat, winMat, materials.roofFlat, materials.roofFlat, winMat, winMat];
+      const building = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mats);
+      building.position.set(bx, h / 2, bz);
+      building.castShadow = true;
+      building.receiveShadow = true;
+      group.add(building);
+      // Flat roof cap with a small parapet look.
+      const cap = new THREE.Mesh(
+        new THREE.BoxGeometry(w + 0.6, 0.5, d + 0.6),
+        materials.roofFlat,
+      );
+      cap.position.set(bx, h + 0.25, bz);
+      cap.castShadow = true;
+      group.add(cap);
+    }
+  }
+
+  // Nia's garage — a low wide building on the centre block, coral door.
+  const garage = new THREE.Mesh(
+    new THREE.BoxGeometry(30, 7, 18),
+    [materials.wallWarm, materials.wallWarm, materials.roofFlat, materials.roofFlat, materials.wallWarm, materials.wallWarm],
+  );
+  garage.position.set(0, 3.5, 8);
+  garage.castShadow = true;
+  garage.receiveShadow = true;
+  group.add(garage);
+  const garageDoor = new THREE.Mesh(
+    new THREE.BoxGeometry(12, 5, 0.4),
+    new THREE.MeshStandardMaterial({ color: CONFIG.palette.coral, roughness: 0.6, metalness: 0.3 }),
+  );
+  garageDoor.position.set(0, 2.5, -1.2);
+  group.add(garageDoor);
+
+  // Street lamps along roads, every ~76 m.
+  const poleGeo = new THREE.CylinderGeometry(0.12, 0.16, 6, 6);
+  const headGeo = new THREE.SphereGeometry(0.35, 8, 6);
+  for (const l of lines) {
+    for (let t = -half + 38; t <= half - 38; t += pitch) {
+      for (const [x, z] of [[l + off + 1.5, t], [t, l + off + 1.5]]) {
+        const pole = new THREE.Mesh(poleGeo, materials.lamp);
+        pole.position.set(x, 3, z);
+        pole.castShadow = true;
+        group.add(pole);
+        const head = new THREE.Mesh(headGeo, materials.lampGlow);
+        head.position.set(x, 6.1, z);
+        group.add(head);
       }
     }
   }
 
-  const carSpawns = [];
-  for (let i = 0; i < 12; i++) {
-    const road = pick(roads);
-    const t = rand(0.1, 0.9);
-    carSpawns.push({
-      x: road.start.x + (road.end.x - road.start.x) * t,
-      z: road.start.z + (road.end.z - road.start.z) * t,
-      heading: road.dir.x !== 0 ? 0 : Math.PI / 2,
-    });
+  // Props: palm-ish trees scattered on blocks, plus crates near the garage.
+  const trunkGeo = new THREE.CylinderGeometry(0.25, 0.4, 5, 6);
+  const leafGeo = new THREE.SphereGeometry(2.2, 8, 6);
+  for (let i = 0; i < 46; i++) {
+    const tx = rand(-half + 10, half - 10);
+    const tz = rand(-half + 10, half - 10);
+    // Keep trees off the roads.
+    const onRoadX = lines.some((l) => Math.abs(tz - l) < roadW / 2 + 3);
+    const onRoadZ = lines.some((l) => Math.abs(tx - l) < roadW / 2 + 3);
+    if (onRoadX || onRoadZ) continue;
+    const trunk = new THREE.Mesh(trunkGeo, materials.trunk);
+    trunk.position.set(tx, 2.5, tz);
+    trunk.castShadow = true;
+    group.add(trunk);
+    const leaf = new THREE.Mesh(leafGeo, materials.leaf);
+    leaf.position.set(tx, 6, tz);
+    leaf.scale.y = 0.6;
+    leaf.castShadow = true;
+    group.add(leaf);
+  }
+  const crateGeo = new THREE.BoxGeometry(1.6, 1.6, 1.6);
+  for (let i = 0; i < 6; i++) {
+    const crate = new THREE.Mesh(crateGeo, materials.wood);
+    crate.position.set(rand(14, 24), 0.8, rand(-6, 20));
+    crate.rotation.y = rand(0, Math.PI);
+    crate.castShadow = true;
+    group.add(crate);
   }
 
-  const playerStart = {
-    x: garage.x,
-    z: garage.z - 10,
-    heading: Math.PI,
-  };
+  // Car spawn points: on roads, spread across the city.
+  const carSpawns = [];
+  for (const l of lines) {
+    carSpawns.push(new THREE.Vector3(l, 0, rand(-200, 200)));
+  }
+  carSpawns.push(
+    new THREE.Vector3(38, 0, -114),
+    new THREE.Vector3(-114, 0, 38),
+    new THREE.Vector3(190, 0, 190),
+    new THREE.Vector3(-190, 0, -190),
+    new THREE.Vector3(114, 0, -38),
+    new THREE.Vector3(16, 0, -8),
+  );
 
-  return {
-    group,
-    roads,
-    sidewalks,
-    carSpawns,
-    playerStart,
-    garage: { x: garage.x, z: garage.z },
-    half,
-    roadLines,
-  };
+  const playerStart = new THREE.Vector3(16, 0, -8);
+
+  return { roads, sidewalks, carSpawns, playerStart };
 }

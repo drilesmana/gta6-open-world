@@ -1,117 +1,63 @@
-// Velora Heat — shared materials. Created once and reused by every module so
-// the game keeps one material per surface instead of one per mesh.
-
-import * as THREE from 'three';
+// Velora Heat — shared materials, created once and reused by every module.
+import * as THREE from '../vendor/three.min.js';
 import { CONFIG } from './config.js';
 
-// Build the full material dictionary. Call once at startup and pass the result
-// to every module that builds meshes.
 export function makeMaterials() {
   const p = CONFIG.palette;
+  const std = (opts) => new THREE.MeshStandardMaterial(opts);
 
-  // Helper: a standard PBR material with a flat colour.
-  function std(color, roughness, metalness) {
-    return new THREE.MeshStandardMaterial({
-      color,
-      roughness: roughness === undefined ? 0.85 : roughness,
-      metalness: metalness === undefined ? 0.0 : metalness,
-    });
-  }
+  return {
+    // Ground and street
+    asphalt: std({ color: 0x33363d, roughness: 0.95, metalness: 0.0 }),
+    sidewalk: std({ color: 0x9a938a, roughness: 0.9, metalness: 0.0 }),
+    kerb: std({ color: 0x6f6a63, roughness: 0.85, metalness: 0.0 }),
+    sand: std({ color: 0xd9c49a, roughness: 1.0, metalness: 0.0 }),
+    grass: std({ color: 0x5d8a4a, roughness: 1.0, metalness: 0.0 }),
 
-  const mats = {
-    // Streets and pavements.
-    asphalt: std(p.asphalt, 0.95, 0.0),
-    roadLine: new THREE.MeshBasicMaterial({ color: 0xf2ead2 }),
-    sidewalk: std(p.sidewalk, 0.95, 0.0),
-    kerb: std(p.kerb, 0.9, 0.0),
-    crosswalk: new THREE.MeshBasicMaterial({ color: 0xd8d2c4 }),
+    // Buildings
+    wall: std({ color: 0xe8dcc8, roughness: 0.85, metalness: 0.0 }),
+    wallWarm: std({ color: 0xe0b98f, roughness: 0.85, metalness: 0.0 }),
+    wallWhite: std({ color: 0xf2ede4, roughness: 0.8, metalness: 0.0 }),
+    wallTeal: std({ color: 0x7fb5ac, roughness: 0.85, metalness: 0.0 }),
+    glass: std({ color: 0x2a4a5e, roughness: 0.15, metalness: 0.6 }),
+    glassLit: std({ color: 0xffc46b, roughness: 0.2, metalness: 0.3, emissive: 0x664411, emissiveIntensity: 0.6 }),
+    roof: std({ color: 0x8a4a3a, roughness: 0.9, metalness: 0.0 }),
+    roofFlat: std({ color: 0x55565c, roughness: 0.95, metalness: 0.0 }),
 
-    // Buildings. Walls are tinted per building at build time by cloning.
-    buildingWallCream: std(0xe8dcc0, 0.9, 0.0),
-    buildingWallTerra: std(0xc97e5a, 0.9, 0.0),
-    buildingWallTeal: std(0x4d8a86, 0.9, 0.0),
-    buildingWallSand: std(0xd9b380, 0.9, 0.0),
-    buildingWallSlate: std(0x5a6672, 0.9, 0.0),
-    buildingGlass: new THREE.MeshStandardMaterial({
-      color: 0x2c3e50,
-      roughness: 0.15,
-      metalness: 0.6,
-    }),
-    roof: std(0x4a4440, 0.95, 0.0),
-    garageDoor: std(0x3d6b8e, 0.6, 0.3),
-    garageSign: new THREE.MeshBasicMaterial({ color: p.gold }),
+    // Street furniture
+    lamp: std({ color: 0x2c2f36, roughness: 0.5, metalness: 0.7 }),
+    lampGlow: std({ color: 0xffe9b0, emissive: 0xffc46b, emissiveIntensity: 1.4, roughness: 0.4 }),
+    metal: std({ color: 0x8f959e, roughness: 0.35, metalness: 0.8 }),
+    wood: std({ color: 0x7a5230, roughness: 0.9, metalness: 0.0 }),
+    leaf: std({ color: 0x3f7a44, roughness: 1.0, metalness: 0.0 }),
+    trunk: std({ color: 0x5a4128, roughness: 1.0, metalness: 0.0 }),
 
-    // Street furniture.
-    lampPole: std(0x2a2e33, 0.5, 0.7),
-    lampGlow: new THREE.MeshBasicMaterial({ color: 0xffe6a8 }),
-    benchWood: std(0x7a5230, 0.9, 0.0),
-    planter: std(0x5d6b4f, 0.95, 0.0),
-    treeTrunk: std(0x6b4a2f, 0.95, 0.0),
-    treeLeaf: std(0x4e7a3a, 0.9, 0.0),
-    hydrant: std(0xc23b2a, 0.6, 0.2),
+    // Cars — paint in several colours
+    paintRed: std({ color: 0xc22e2e, roughness: 0.3, metalness: 0.5 }),
+    paintBlue: std({ color: 0x2e5ec2, roughness: 0.3, metalness: 0.5 }),
+    paintYellow: std({ color: 0xe8b820, roughness: 0.3, metalness: 0.5 }),
+    paintWhite: std({ color: 0xe8e6e0, roughness: 0.3, metalness: 0.4 }),
+    paintBlack: std({ color: 0x1a1c20, roughness: 0.25, metalness: 0.6 }),
+    paintTeal: std({ color: p.teal, roughness: 0.3, metalness: 0.5 }),
+    paintCoral: std({ color: p.coral, roughness: 0.3, metalness: 0.5 }),
+    paintGold: std({ color: p.gold, roughness: 0.2, metalness: 0.7 }),
+    paintPolice: std({ color: 0xf0f0f0, roughness: 0.3, metalness: 0.4 }),
+    paintPoliceBlue: std({ color: 0x1e3fae, roughness: 0.3, metalness: 0.5 }),
 
-    // Cars. Paint is glossy, glass is dark and reflective, tyres matte.
-    carRed: std(0xb03030, 0.25, 0.4),
-    carBlue: std(0x2f5fb0, 0.25, 0.4),
-    carYellow: std(0xe0a52a, 0.25, 0.4),
-    carWhite: std(0xe8e6df, 0.25, 0.4),
-    carBlack: std(0x1c1e22, 0.25, 0.4),
-    carTeal: std(p.teal, 0.25, 0.4),
-    carGold: new THREE.MeshStandardMaterial({
-      color: p.gold,
-      roughness: 0.15,
-      metalness: 0.9,
-    }),
-    carPolice: std(0xe8e8e8, 0.25, 0.4),
-    carPoliceBlue: std(0x1c4ed8, 0.25, 0.4),
-    tyre: std(0x17181a, 0.95, 0.0),
-    wheelHub: std(0x9aa0a6, 0.35, 0.8),
-    carWindow: new THREE.MeshStandardMaterial({
-      color: 0x10161f,
-      roughness: 0.1,
-      metalness: 0.7,
-    }),
-    headlight: new THREE.MeshBasicMaterial({ color: 0xfff2c0 }),
-    taillight: new THREE.MeshBasicMaterial({ color: 0xd42a1e }),
-    policeLightRed: new THREE.MeshBasicMaterial({ color: 0xff2a1e }),
-    policeLightBlue: new THREE.MeshBasicMaterial({ color: 0x2a5bff }),
+    // Car parts
+    tyre: std({ color: 0x141518, roughness: 1.0, metalness: 0.0 }),
+    window: std({ color: 0x18242e, roughness: 0.1, metalness: 0.7 }),
+    headlight: std({ color: 0xfff6c8, emissive: 0xffe9a0, emissiveIntensity: 1.2, roughness: 0.2 }),
+    taillight: std({ color: 0xc21818, emissive: 0x881111, emissiveIntensity: 0.8, roughness: 0.3 }),
+    chrome: std({ color: 0xd8dce2, roughness: 0.15, metalness: 0.9 }),
 
-    // People.
-    skinA: std(0xc98d64, 0.7, 0.0),
-    skinB: std(0x8a5a38, 0.7, 0.0),
-    skinC: std(0xe8b98d, 0.7, 0.0),
-    shirtCoral: std(p.coral, 0.85, 0.0),
-    shirtTeal: std(p.teal, 0.85, 0.0),
-    shirtCream: std(p.cream, 0.85, 0.0),
-    shirtNavy: std(0x2a3a55, 0.85, 0.0),
-    shirtGold: std(p.gold, 0.85, 0.0),
-    pantsDark: std(0x2e3440, 0.9, 0.0),
-    pantsBlue: std(0x3a4a6b, 0.9, 0.0),
-
-    // Player outfit: Dario wears a coral shirt and dark trousers.
-    playerShirt: std(p.coral, 0.85, 0.0),
-    playerPants: std(0x232830, 0.9, 0.0),
-    playerHair: std(0x1e1a16, 0.9, 0.0),
-
-    // Ground far outside the city, and the sea at the bay edge.
-    ground: std(0x7d7466, 1.0, 0.0),
-    sand: std(0xdcc49a, 1.0, 0.0),
-    sea: new THREE.MeshStandardMaterial({
-      color: 0x2a6f8f,
-      roughness: 0.25,
-      metalness: 0.1,
-    }),
+    // People
+    skin: std({ color: 0xc98e6b, roughness: 0.7, metalness: 0.0 }),
+    skinDark: std({ color: 0x8a5a3b, roughness: 0.7, metalness: 0.0 }),
+    shirt: std({ color: 0x3e6fb0, roughness: 0.85, metalness: 0.0 }),
+    shirtRed: std({ color: 0xb03e3e, roughness: 0.85, metalness: 0.0 }),
+    shirtGreen: std({ color: 0x3e8a5a, roughness: 0.85, metalness: 0.0 }),
+    pants: std({ color: 0x2e3440, roughness: 0.9, metalness: 0.0 }),
+    hair: std({ color: 0x241a12, roughness: 0.95, metalness: 0.0 }),
   };
-
-  return mats;
 }
-
-// The car paint colours the vehicle factory can use, keyed by name.
-export const CAR_PAINTS = [
-  'carRed',
-  'carBlue',
-  'carYellow',
-  'carWhite',
-  'carBlack',
-  'carTeal',
-];

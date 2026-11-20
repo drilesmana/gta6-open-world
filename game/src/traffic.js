@@ -1,205 +1,219 @@
-import * as THREE from 'three';
+// traffic.js — Velora Heat (chunk 2)
+// AI traffic: cars follow the road network, stop for each other, and despawn
+// far from the player. Built from the spec contract only:
+// createTraffic(scene, city, makeCar) — city supplies the road network
+// (segments with start, end, direction). Exposes the live traffic cars and
+// an update function, plus nearestCarTo / removeCar so the player can steal
+// a car (carjack). THREE comes from the global loaded by index.html.
+
 import { CONFIG } from './config.js';
 import { rand, randInt, pick, clamp } from './util.js';
 import { CAR_COLOURS } from './vehicles.js';
 
-// City traffic for Velora Heat. AI cars drive along the road network: each
-// car owns a segment and a distance along it, and at the end of a segment it
-// picks a connected one. Cars stop for the car ahead on their segment (and
-// for the player's car), and cars far from the player despawn and respawn on
-// a road near the player so the streets always feel alive.
+function three() {
+  const T = globalThis.THREE;
+  if (!T) throw new Error('THREE global is not loaded — index.html must load ./vendor/three.min.js before main.js');
+  return T;
+}
 
-function tun(keys, fallback) {
-  const c = CONFIG || {};
-  for (const k of keys) {
-    const parts = k.split('.');
-    let v = c;
-    let ok = true;
-    for (const p of parts) {
-      if (v && typeof v === 'object' && p in v) v = v[p];
-      else { ok = false; break; }
+function cfgNum(paths, fallback) {
+  for (const path of paths) {
+    let v = CONFIG;
+    for (const key of path.split('.')) {
+      if (v === undefined || v === null) break;
+      v = v[key];
     }
-    if (ok && typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
   }
   return fallback;
 }
 
-function toXZ(v) {
-  if (!v) return null;
-  if (Array.isArray(v)) {
-    if (v.length >= 3) return { x: v[0], z: v[2] };
-    if (v.length >= 2) return { x: v[0], z: v[1] };
-    return null;
-  }
-  if (typeof v === 'object' && typeof v.x === 'number' && typeof v.z === 'number') {
-    return { x: v.x, z: v.z };
-  }
+// Pull x/z out of whatever shape a point comes in (Vector3, {x,z}, [x,z]).
+function pointXZ(p) {
+  if (!p) return null;
+  if (Array.isArray(p)) return { x: p[0] || 0, z: p[2] !== undefined ? p[2] : p[1] || 0 };
+  if (typeof p.x === 'number' && typeof p.z === 'number') return { x: p.x, z: p.z };
+  if (typeof p.x === 'number' && typeof p.y === 'number') return { x: p.x, z: p.y };
   return null;
 }
 
-function normRoads(city) {
-  const c = city || {};
-  const raw = c.roads || c.roadSegments || c.segments || c.network || c.roadsList || [];
+// Normalise the city's road list into { start, end, dir, length } segments.
+function normalizeRoads(city) {
+  const raw = (city && (city.roads || city.roadNetwork || city.segments || city.roadSegments)) || [];
   const out = [];
-  if (Array.isArray(raw)) {
-    for (const s of raw) {
-      if (!s) continue;
-      const a = toXZ(s.start || s.a || s.from || s.p0);
-      const b = toXZ(s.end || s.b || s.to || s.p1);
-      if (!a || !b) continue;
-      const dx = b.x - a.x;
-      const dz = b.z - a.z;
-      const len = Math.hypot(dx, dz);
-      if (len < 0.01) continue;
-      out.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, dx: dx / len, dz: dz / len, len });
-    }
+  for (const seg of raw) {
+    if (!seg) continue;
+    const start = pointXZ(seg.start || seg.from || seg.a);
+    const end = pointXZ(seg.end || seg.to || seg.b);
+    if (!start || !end) continue;
+    const dx = end.x - start.x;
+    const dz = end.z - start.z;
+    const len = Math.hypot(dx, dz);
+    if (len < 1) continue;
+    out.push({ start, end, dir: { x: dx / len, z: dz / len }, length: len });
   }
   return out;
 }
 
-function fallbackGrid() {
-  // A 5x5 grid of two-way streets, used only if the city object carries no
-  // road network at all. Spacing 40, half-size 80.
-  const segs = [];
-  const half = 80;
-  const step = 40;
-  for (let i = -2; i <= 2; i++) {
-    const c = i * step;
-    segs.push({ ax: -half, az: c, bx: half, bz: c, dx: 1, dz: 0, len: half * 2 });
-    segs.push({ ax: half, az: c, bx: -half, bz: c, dx: -1, dz: 0, len: half * 2 });
-    segs.push({ ax: c, az: -half, bx: c, bz: half, dx: 0, dz: 1, len: half * 2 });
-    segs.push({ ax: c, az: half, bx: c, bz: -half, dx: 0, dz: -1, len: half * 2 });
-  }
-  return segs;
+function dist2(ax, az, bx, bz) {
+  const dx = ax - bx;
+  const dz = az - bz;
+  return dx * dx + dz * dz;
 }
 
-const KINDS = ['sedan', 'sedan', 'hatch', 'hatch', 'truck'];
-
-// createTraffic(scene, city, makeCar): returns the traffic system. It
-// exposes cars (the live traffic car entries), count, and update(dt,
-// playerPos, playerCar). Each entry is { group, seg, t, speed,
-// targetSpeed }. playerCar is the player's car group when driving, or null.
 export function createTraffic(scene, city, makeCar) {
-  let roads = normRoads(city);
-  if (roads.length === 0) roads = fallbackGrid();
-  const count = Math.max(1, Math.round(tun(['traffic.count', 'trafficCount', 'traffic.cars'], 12)));
-  const cruiseMin = tun(['traffic.speedMin', 'traffic.cruiseMin'], 7);
-  const cruiseMax = tun(['traffic.speedMax', 'traffic.cruiseMax'], 12);
-  const despawnDist = tun(['traffic.despawnDistance', 'traffic.despawn'], 150);
-  const colours = (CAR_COLOURS && CAR_COLOURS.length) ? CAR_COLOURS : ['silver', 'red', 'blue', 'teal'];
+  const THREE = three();
+  const roads = normalizeRoads(city);
+  const count = cfgNum(['traffic.count', 'trafficCount', 'traffic.cars'], 12);
+  const cruiseMin = cfgNum(['traffic.minSpeed', 'traffic.cruiseMin'], 8);
+  const cruiseMax = cfgNum(['traffic.maxSpeed', 'traffic.cruiseMax'], 14);
+  const despawnDist = cfgNum(['traffic.despawnDistance', 'traffic.despawnDist'], 240);
 
   const traffic = {
-    scene,
-    city,
+    cars: [], // live records: { group, segment, t, speed, cruise, lateral }
     roads,
-    cars: [],
-    count,
 
-    _spawnEntry(nearPos) {
-      let seg;
-      if (nearPos) {
-        // Prefer a segment whose midpoint is near the player.
-        const near = roads.filter((s) => {
-          const mx = (s.ax + s.bx) / 2;
-          const mz = (s.az + s.bz) / 2;
-          return Math.hypot(mx - nearPos.x, mz - nearPos.z) < 70;
-        });
-        seg = near.length ? pick(near) : pick(roads);
-      } else {
-        seg = pick(roads);
-      }
-      const group = makeCar(pick(colours), pick(KINDS), null);
-      group.position.set(0, 0, 0);
-      scene.add(group);
-      return {
+    spawnCar(segment, t) {
+      const seg = segment || (roads.length ? pick(roads) : null);
+      if (!seg) return null;
+      const kind = pick(['sedan', 'sedan', 'sedan', 'hatch', 'hatch', 'truck']);
+      const group = makeCar(pick(CAR_COLOURS), kind, undefined);
+      const rec = {
         group,
-        seg,
-        t: rand(0, seg.len),
-        speed: rand(cruiseMin, cruiseMax),
-        targetSpeed: rand(cruiseMin, cruiseMax),
+        segment: seg,
+        t: t !== undefined ? t : Math.random(),
+        speed: 0,
+        cruise: rand(cruiseMin, cruiseMax),
+        lateral: rand(-1.6, 1.6),
+        length: group.userData.length || 4.3,
       };
+      traffic.placeOnRoad(rec);
+      scene.add(group);
+      traffic.cars.push(rec);
+      return rec;
     },
 
-    _place(entry) {
-      const s = entry.seg;
-      entry.group.position.set(s.ax + s.dx * entry.t, 0, s.az + s.dz * entry.t);
-      entry.group.rotation.y = Math.atan2(s.dx, s.dz);
+    placeOnRoad(rec) {
+      const seg = rec.segment;
+      const along = seg.start.x + seg.dir.x * seg.length * rec.t;
+      const alongZ = seg.start.z + seg.dir.z * seg.length * rec.t;
+      // Lateral offset is perpendicular to the road direction.
+      const px = -seg.dir.z;
+      const pz = seg.dir.x;
+      rec.group.position.set(along + px * rec.lateral, 0, alongZ + pz * rec.lateral);
+      rec.group.rotation.y = Math.atan2(seg.dir.x, seg.dir.z);
     },
 
-    _nextSeg(entry) {
-      const end = { x: entry.seg.bx, z: entry.seg.bz };
-      const cands = roads.filter((s) => Math.hypot(s.ax - end.x, s.az - end.z) < 6);
-      if (cands.length) return pick(cands);
-      // Dead end: turn around and drive the same street back.
-      const s = entry.seg;
-      return { ax: s.bx, az: s.bz, bx: s.ax, bz: s.az, dx: -s.dx, dz: -s.dz, len: s.len };
+    // The car ahead on the same segment, if any, and the gap to it in metres.
+    carAhead(rec) {
+      let best = null;
+      let bestGap = Infinity;
+      for (const other of traffic.cars) {
+        if (other === rec || other.segment !== rec.segment) continue;
+        const gap = (other.t - rec.t) * rec.segment.length;
+        if (gap > 0 && gap < bestGap) {
+          bestGap = gap;
+          best = other;
+        }
+      }
+      return { car: best, gap: bestGap };
     },
 
-    update(dt, playerPos, playerCar) {
-      const px = playerPos ? playerPos.x : 0;
-      const pz = playerPos ? playerPos.z : 0;
-      for (const entry of this.cars) {
-        // Stop for the car ahead on the same segment.
-        let target = entry.targetSpeed;
-        for (const other of this.cars) {
-          if (other === entry || other.seg !== entry.seg) continue;
-          const gap = other.t - entry.t;
-          if (gap > 0 && gap < 9) {
-            target = Math.min(target, other.speed);
-            if (gap < 5) target = 0;
+    // Next segment whose start is near this segment's end; null if none.
+    nextSegment(seg) {
+      const near = [];
+      for (const other of roads) {
+        if (other === seg) continue;
+        if (dist2(other.start.x, other.start.z, seg.end.x, seg.end.z) < 36) near.push(other);
+      }
+      if (near.length) return pick(near);
+      return null;
+    },
+
+    nearestCarTo(x, z, maxDist) {
+      let best = null;
+      let bestD = maxDist * maxDist;
+      for (const rec of traffic.cars) {
+        const d = dist2(rec.group.position.x, rec.group.position.z, x, z);
+        if (d < bestD) {
+          bestD = d;
+          best = rec;
+        }
+      }
+      return best;
+    },
+
+    // Take a car out of traffic (player steals it). Returns the car group.
+    removeCar(rec) {
+      const i = traffic.cars.indexOf(rec);
+      if (i === -1) return null;
+      traffic.cars.splice(i, 1);
+      scene.remove(rec.group);
+      return rec.group;
+    },
+
+    update(dt, playerPos) {
+      const px = playerPos ? (playerPos.x || 0) : 0;
+      const pz = playerPos ? (playerPos.z || 0) : 0;
+
+      for (const rec of traffic.cars) {
+        // Stop for the car ahead: brake when the gap closes under ~10 m.
+        let target = rec.cruise;
+        const ahead = traffic.carAhead(rec);
+        if (ahead.car && ahead.gap < 12) {
+          target = ahead.gap < 6 ? 0 : ahead.car.speed * 0.8;
+        }
+        rec.speed += clamp(target - rec.speed, -8 * dt, 5 * dt);
+        if (rec.speed < 0) rec.speed = 0;
+
+        rec.t += (rec.speed * dt) / rec.segment.length;
+        if (rec.t >= 1) {
+          const next = traffic.nextSegment(rec.segment);
+          if (next) {
+            rec.segment = next;
+            rec.t = 0;
+          } else {
+            // Dead end: turn around and drive back along the same road.
+            const tmp = rec.segment.start;
+            rec.segment = {
+              start: rec.segment.end,
+              end: tmp,
+              dir: { x: -rec.segment.dir.x, z: -rec.segment.dir.z },
+              length: rec.segment.length,
+            };
+            rec.t = 0;
           }
         }
-        // Stop for the player's car ahead on the same segment.
-        if (playerCar && playerCar.position) {
-          const dx = playerCar.position.x - entry.group.position.x;
-          const dz = playerCar.position.z - entry.group.position.z;
-          const ahead = dx * entry.seg.dx + dz * entry.seg.dz;
-          const side = Math.abs(dx * entry.seg.dz - dz * entry.seg.dx);
-          if (ahead > 0 && ahead < 10 && side < 3) target = 0;
-        }
-        entry.speed += clamp(target - entry.speed, -14 * dt, 8 * dt);
-        if (entry.speed < 0) entry.speed = 0;
-        entry.t += entry.speed * dt;
-        if (entry.t >= entry.seg.len) {
-          entry.seg = this._nextSeg(entry);
-          entry.t = 0;
-        }
-        this._place(entry);
+        traffic.placeOnRoad(rec);
+
         // Spin the wheels.
-        const w = entry.group.userData && entry.group.userData.wheels;
-        if (w) {
-          const spin = (entry.speed / (entry.group.userData.wheelRadius || 0.36)) * dt;
-          for (const key of ['frontL', 'frontR', 'rearL', 'rearR']) {
-            const pivot = w[key];
-            if (pivot && pivot.userData.tyre) pivot.userData.tyre.rotation.x += spin;
+        const wheels = rec.group.userData.wheels || [];
+        const spin = (rec.speed * dt) / (rec.group.userData.wheelRadius || 0.36);
+        for (const wheel of wheels) wheel.rotation.x += spin;
+      }
+
+      // Despawn far away, respawn on a road near the player to keep the
+      // streets alive around them.
+      for (const rec of traffic.cars) {
+        if (dist2(rec.group.position.x, rec.group.position.z, px, pz) > despawnDist * despawnDist) {
+          const nearRoads = roads.filter((seg) => {
+            const mx = (seg.start.x + seg.end.x) / 2;
+            const mz = (seg.start.z + seg.end.z) / 2;
+            const d = dist2(mx, mz, px, pz);
+            return d > 60 * 60 && d < 160 * 160;
+          });
+          const seg = nearRoads.length ? pick(nearRoads) : pick(roads);
+          if (seg) {
+            rec.segment = seg;
+            rec.t = Math.random();
+            rec.cruise = rand(cruiseMin, cruiseMax);
+            traffic.placeOnRoad(rec);
           }
-        }
-        // Despawn far away, respawn near the player.
-        const d = Math.hypot(entry.group.position.x - px, entry.group.position.z - pz);
-        if (d > despawnDist) {
-          const fresh = this._spawnEntry({ x: px, z: pz });
-          scene.remove(entry.group);
-          entry.group = fresh.group;
-          entry.seg = fresh.seg;
-          entry.t = fresh.t;
-          entry.speed = fresh.speed;
-          entry.targetSpeed = fresh.targetSpeed;
-          this._place(entry);
         }
       }
     },
   };
 
-  for (let i = 0; i < count; i++) {
-    const entry = traffic._spawnEntry(null);
-    traffic.cars.push(entry);
-    traffic._place(entry);
-  }
-  // Pre-scatter: start each car at a different point along its street.
-  for (const entry of traffic.cars) {
-    entry.t = randInt(0, Math.floor(entry.seg.len));
-    traffic._place(entry);
-  }
-
+  for (let i = 0; i < count; i++) traffic.spawnCar();
   return traffic;
 }

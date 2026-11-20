@@ -1,194 +1,144 @@
-import * as THREE from 'three';
+// pedestrians.js — Velora Heat (chunk 2)
+// Sidewalk walkers: they stroll between waypoints and cross roads on their
+// way. Built from the spec contract only: createPedestrians(scene, city,
+// makePerson) — city supplies the sidewalk waypoints. Exposes the live
+// pedestrians and an update function.
+// THREE comes from the global loaded by index.html (./vendor/three.min.js).
+
 import { CONFIG } from './config.js';
-import { rand, randInt, pick, clamp } from './util.js';
-import { makePerson, swingWalk } from './characters.js';
+import { rand, pick, clamp } from './util.js';
 
-// Pedestrians for Velora Heat. Walkers stroll between sidewalk waypoints,
-// sometimes crossing a road to the next one, and run away when a fast car
-// bears down on them. Each walker is a makePerson group; the system drives
-// its position, heading and walk swing.
+function three() {
+  const T = globalThis.THREE;
+  if (!T) throw new Error('THREE global is not loaded — index.html must load ./vendor/three.min.js before main.js');
+  return T;
+}
 
-function tun(keys, fallback) {
-  const c = CONFIG || {};
-  for (const k of keys) {
-    const parts = k.split('.');
-    let v = c;
-    let ok = true;
-    for (const p of parts) {
-      if (v && typeof v === 'object' && p in v) v = v[p];
-      else { ok = false; break; }
+function cfgNum(paths, fallback) {
+  for (const path of paths) {
+    let v = CONFIG;
+    for (const key of path.split('.')) {
+      if (v === undefined || v === null) break;
+      v = v[key];
     }
-    if (ok && typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
   }
   return fallback;
 }
 
-function toXZ(v) {
-  if (!v) return null;
-  if (Array.isArray(v)) {
-    if (v.length >= 3) return { x: v[0], z: v[2] };
-    if (v.length >= 2) return { x: v[0], z: v[1] };
-    return null;
-  }
-  if (typeof v === 'object' && typeof v.x === 'number' && typeof v.z === 'number') {
-    return { x: v.x, z: v.z };
-  }
+function pointXZ(p) {
+  if (!p) return null;
+  if (Array.isArray(p)) return { x: p[0] || 0, z: p[2] !== undefined ? p[2] : p[1] || 0 };
+  if (typeof p.x === 'number' && typeof p.z === 'number') return { x: p.x, z: p.z };
+  if (typeof p.x === 'number' && typeof p.y === 'number') return { x: p.x, z: p.y };
   return null;
 }
 
-function normWaypoints(city) {
-  const c = city || {};
-  const raw = c.sidewalkWaypoints || c.waypoints || c.pedestrianWaypoints
-    || c.sidewalkPoints || c.pedWaypoints || [];
-  const out = [];
-  if (Array.isArray(raw)) {
-    for (const w of raw) {
-      const p = toXZ(w);
-      if (p) out.push(p);
-    }
-  }
-  return out;
+function dist2(ax, az, bx, bz) {
+  const dx = ax - bx;
+  const dz = az - bz;
+  return dx * dx + dz * dz;
 }
 
-function fallbackWaypoints() {
-  // Sidewalk points along a 5x5 street grid, used only if the city object
-  // carries no waypoints. Streets every 40 m, sidewalks 6 m off centre.
-  const pts = [];
-  const half = 80;
-  for (let i = -2; i <= 2; i++) {
-    const c = i * 40;
-    for (let d = -half; d <= half; d += 14) {
-      pts.push({ x: c + 6, z: d });
-      pts.push({ x: c - 6, z: d });
-      pts.push({ x: d, z: c + 6 });
-      pts.push({ x: d, z: c - 6 });
-    }
-  }
-  return pts;
-}
+const VARIANTS = ['walker', 'commuter', 'tourist', 'local', 'runner', 'elder', 'student', 'vendor'];
 
-// createPedestrians(scene, city, makePerson): returns the pedestrian system.
-// It exposes list (the live walker entries), count, and update(dt,
-// playerPos, cars). Each entry is { group, target, speed, phase, fleeing }.
-// cars is an optional array of moving cars (traffic entries or car groups)
-// used for the flee check.
-export function createPedestrians(scene, city, makePersonFn) {
-  let waypoints = normWaypoints(city);
-  if (waypoints.length === 0) waypoints = fallbackWaypoints();
-  const count = Math.max(1, Math.round(tun(['pedestrians.count', 'pedestrianCount', 'pedestrians.walkers'], 18)));
-  const walkMin = tun(['pedestrians.walkMin', 'pedestrian.walkMin'], 0.9);
-  const walkMax = tun(['pedestrians.walkMax', 'pedestrian.walkMax'], 1.7);
-  const fleeSpeed = tun(['pedestrians.fleeSpeed', 'pedestrian.flee'], 5.0);
-  const halfSize = tun(['city.halfSize', 'city.half', 'cityHalfSize'], null)
-    ?? tun(['city.size', 'citySize', 'city.width'], 240) / 2;
+export function createPedestrians(scene, city, makePerson) {
+  const THREE = three();
+  const rawWaypoints = (city && (city.sidewalkWaypoints || city.waypoints || city.pedestrianWaypoints)) || [];
+  const waypoints = rawWaypoints.map(pointXZ).filter(Boolean);
+  const count = cfgNum(['pedestrians.count', 'pedestrianCount', 'pedestrians.walkers'], 14);
+  const walkMin = cfgNum(['pedestrians.minSpeed', 'pedestrian.walkMin'], 0.9);
+  const walkMax = cfgNum(['pedestrians.maxSpeed', 'pedestrian.walkMax'], 1.7);
+  const despawnDist = cfgNum(['pedestrians.despawnDistance', 'pedestrian.despawnDist'], 200);
 
   const peds = {
-    scene,
-    city,
+    pedestrians: [], // live records: { group, target, speed, phase, idle }
     waypoints,
-    list: [],
-    count,
 
-    _spawn() {
-      const group = makePersonFn('pedestrian', null);
-      const start = pick(waypoints);
+    spawnPedestrian(at) {
+      if (!waypoints.length) return null;
+      const group = makePerson(pick(VARIANTS), undefined);
+      const start = at || pick(waypoints);
       group.position.set(start.x, 0, start.z);
-      scene.add(group);
-      const target = pick(waypoints);
-      return {
+      const rec = {
         group,
-        target: { x: target.x, z: target.z },
+        target: pick(waypoints),
         speed: rand(walkMin, walkMax),
-        phase: rand(0, Math.PI * 2),
-        fleeing: false,
-        fleeUntil: 0,
+        phase: Math.random() * Math.PI * 2,
+        idle: 0,
       };
+      scene.add(group);
+      peds.pedestrians.push(rec);
+      return rec;
     },
 
-    _pickTarget(entry, awayFrom) {
-      if (awayFrom) {
-        // A waypoint roughly away from the threat.
-        let best = null;
-        let bestScore = -Infinity;
-        for (let i = 0; i < 6; i++) {
-          const w = pick(waypoints);
-          const dx = w.x - entry.group.position.x;
-          const dz = w.z - entry.group.position.z;
-          const away = dx * awayFrom.x + dz * awayFrom.z;
-          const score = away + rand(0, 4);
-          if (score > bestScore) {
-            bestScore = score;
-            best = w;
-          }
+    nearestPedestrianTo(x, z, maxDist) {
+      let best = null;
+      let bestD = maxDist * maxDist;
+      for (const rec of peds.pedestrians) {
+        const d = dist2(rec.group.position.x, rec.group.position.z, x, z);
+        if (d < bestD) {
+          bestD = d;
+          best = rec;
         }
-        return best ? { x: best.x, z: best.z } : pick(waypoints);
       }
-      const w = pick(waypoints);
-      return { x: w.x, z: w.z };
+      return best;
     },
 
-    update(dt, playerPos, cars) {
-      const now = (this._time = (this._time || 0) + dt);
-      for (const entry of this.list) {
-        const g = entry.group;
-        // Flee check: a fast car closing in within ~7 m.
-        let threat = null;
-        for (const car of cars || []) {
-          if (!car) continue;
-          const pos = car.position || car.group?.position || car;
-          if (!pos || typeof pos.x !== 'number') continue;
-          const speed = typeof car.speed === 'number' ? car.speed : 0;
-          if (speed < 6) continue;
-          const dx = g.position.x - pos.x;
-          const dz = g.position.z - pos.z;
-          const dist = Math.hypot(dx, dz);
-          if (dist > 8) continue;
-          const heading = typeof car.heading === 'number'
-            ? car.heading
-            : (car.rotation ? car.rotation.y : 0);
-          const fx = Math.sin(heading);
-          const fz = Math.cos(heading);
-          // Closing is positive when the pedestrian is ahead of the car in
-          // the direction the car is travelling (dot of car-to-ped with
-          // the car's forward vector).
-          const closing = (dx * fx + dz * fz) / Math.max(dist, 0.01);
-          if (closing > 0.4) {
-            threat = { x: dx / Math.max(dist, 0.01), z: dz / Math.max(dist, 0.01) };
-            break;
+    update(dt, playerPos) {
+      const px = playerPos ? (playerPos.x || 0) : 0;
+      const pz = playerPos ? (playerPos.z || 0) : 0;
+
+      for (const rec of peds.pedestrians) {
+        if (rec.idle > 0) {
+          rec.idle -= dt;
+          if (rec.group.userData.applyWalk) rec.group.userData.applyWalk(rec.phase, 0);
+          continue;
+        }
+        const g = rec.group;
+        const dx = rec.target.x - g.position.x;
+        const dz = rec.target.z - g.position.z;
+        const d = Math.hypot(dx, dz);
+        if (d < 0.6) {
+          // Arrived: sometimes pause and look around, then pick a new target.
+          if (Math.random() < 0.25) rec.idle = rand(1, 4);
+          rec.target = pick(waypoints);
+          continue;
+        }
+        const step = rec.speed * dt;
+        g.position.x += (dx / d) * step;
+        g.position.z += (dz / d) * step;
+        // Face the walking direction, turning smoothly.
+        const targetHeading = Math.atan2(dx, dz);
+        let diff = targetHeading - g.rotation.y;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        g.rotation.y += clamp(diff, -3 * dt, 3 * dt);
+
+        // Walk swing driven by distance covered.
+        rec.phase += rec.speed * dt * 3.2;
+        if (g.userData.applyWalk) g.userData.applyWalk(rec.phase, 1);
+      }
+
+      // Walkers who drifted far from the player respawn on a waypoint near
+      // them, so the sidewalks around the player stay populated.
+      for (const rec of peds.pedestrians) {
+        if (dist2(rec.group.position.x, rec.group.position.z, px, pz) > despawnDist * despawnDist) {
+          const near = waypoints.filter((w) => {
+            const d = dist2(w.x, w.z, px, pz);
+            return d > 40 * 40 && d < 140 * 140;
+          });
+          const spot = near.length ? pick(near) : pick(waypoints);
+          if (spot) {
+            rec.group.position.set(spot.x, 0, spot.z);
+            rec.target = pick(waypoints);
+            rec.idle = 0;
           }
         }
-        if (threat) {
-          entry.fleeing = true;
-          entry.fleeUntil = now + 1.2;
-          entry.target = this._pickTarget(entry, threat);
-          entry.speed = fleeSpeed;
-        } else if (entry.fleeing && now > entry.fleeUntil) {
-          entry.fleeing = false;
-          entry.speed = rand(walkMin, walkMax);
-        }
-
-        const dx = entry.target.x - g.position.x;
-        const dz = entry.target.z - g.position.z;
-        const dist = Math.hypot(dx, dz);
-        if (dist < 0.9) {
-          entry.target = this._pickTarget(entry, null);
-        } else {
-          const nx = dx / dist;
-          const nz = dz / dist;
-          g.position.x += nx * entry.speed * dt;
-          g.position.z += nz * entry.speed * dt;
-          g.position.x = clamp(g.position.x, -halfSize, halfSize);
-          g.position.z = clamp(g.position.z, -halfSize, halfSize);
-          g.rotation.y = Math.atan2(nx, nz);
-          entry.phase += entry.speed * dt * 1.6;
-        }
-        swingWalk(g, entry.phase, entry.speed > 0.1 ? 0.55 : 0);
       }
     },
   };
 
-  for (let i = 0; i < count; i++) {
-    peds.list.push(peds._spawn());
-  }
+  for (let i = 0; i < count; i++) peds.spawnPedestrian();
   return peds;
 }

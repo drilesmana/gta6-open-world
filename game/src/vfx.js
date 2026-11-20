@@ -1,160 +1,130 @@
-import * as THREE from 'three';
+// vfx.js — Velora Heat (chunk 2)
+// Lightweight particle effects: tyre smoke, sparks, and a small muzzle flash.
+// Built from the spec contract only: createVfx(scene) returns an object with
+// spawn functions for each effect and an update function that fades them out.
+// Sprites share one canvas-generated radial texture (no external files).
+// THREE comes from the global loaded by index.html (./vendor/three.min.js).
 
-// Particle effects for Velora Heat: tyre smoke, sparks and a small muzzle
-// flash. One pool of sprites is reused so nothing is allocated per frame.
-// The soft round sprite texture is a DataTexture computed in code, so the
-// module loads in Node (no canvas, no DOM) as well as in the browser.
+import { rand } from './util.js';
 
-const POOL = 90;
+function three() {
+  const T = globalThis.THREE;
+  if (!T) throw new Error('THREE global is not loaded — index.html must load ./vendor/three.min.js before main.js');
+  return T;
+}
 
-function softTexture() {
-  const size = 32;
-  const data = new Uint8Array(size * size * 4);
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const dx = (x + 0.5) / size - 0.5;
-      const dy = (y + 0.5) / size - 0.5;
-      const r = Math.hypot(dx, dy) * 2;
-      const a = Math.max(0, 1 - r);
-      const i = (y * size + x) * 4;
-      data[i] = 255;
-      data[i + 1] = 255;
-      data[i + 2] = 255;
-      data[i + 3] = Math.round(a * a * 255);
-    }
-  }
-  const tex = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
-  tex.needsUpdate = true;
+function makeGlowTexture() {
+  const THREE = three();
+  const size = 64;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.4, 'rgba(255,255,255,0.6)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(canvas);
   return tex;
 }
 
-// createVfx(scene): returns the effects object with spawn functions
-// smoke(pos, count), sparks(pos, count), flash(pos), an update(dt) that
-// fades particles out, and alive (how many particles are currently lit).
 export function createVfx(scene) {
-  const tex = softTexture();
-  const pool = [];
-  for (let i = 0; i < POOL; i++) {
+  const THREE = three();
+  const texture = makeGlowTexture();
+  const particles = []; // { sprite, vel, life, maxLife, grow, fade }
+
+  function spawnSprite(x, y, z, color, size, opacity) {
     const material = new THREE.SpriteMaterial({
-      map: tex,
+      map: texture,
+      color,
       transparent: true,
+      opacity,
       depthWrite: false,
-      opacity: 0,
-      color: 0xffffff,
     });
     const sprite = new THREE.Sprite(material);
-    sprite.visible = false;
-    sprite.scale.set(1, 1, 1);
+    sprite.position.set(x, y, z);
+    sprite.scale.setScalar(size);
     scene.add(sprite);
-    pool.push({
-      sprite,
-      material,
-      vel: new THREE.Vector3(),
-      life: 0,
-      maxLife: 1,
-      size0: 1,
-      size1: 1,
-      grav: 0,
-      active: false,
-    });
+    return sprite;
   }
 
-  function spawn(pos, opts) {
-    let p = null;
-    for (const cand of pool) {
-      if (!cand.active) {
-        p = cand;
-        break;
-      }
-    }
-    if (!p) return;
-    p.active = true;
-    p.sprite.visible = true;
-    p.sprite.position.set(pos.x, pos.y, pos.z);
-    p.vel.set(
-      (Math.random() - 0.5) * (opts.spread || 1),
-      (opts.up || 0) + (Math.random() - 0.5) * (opts.spread || 1) * 0.6,
-      (Math.random() - 0.5) * (opts.spread || 1),
-    );
-    p.life = opts.life;
-    p.maxLife = opts.life;
-    p.size0 = opts.size0;
-    p.size1 = opts.size1;
-    p.grav = opts.grav || 0;
-    p.material.color.setHex(opts.color);
-    p.material.opacity = opts.opacity ?? 0.85;
-    p.sprite.scale.set(opts.size0, opts.size0, 1);
+  function addParticle(sprite, vel, life, grow) {
+    particles.push({ sprite, vel, life, maxLife: life, grow });
   }
 
   const vfx = {
-    pool,
-    alive: 0,
-
-    smoke(pos, count = 6) {
-      for (let i = 0; i < count; i++) {
-        spawn(pos, {
-          color: 0x9a9a9a,
-          life: 0.7 + Math.random() * 0.4,
-          size0: 0.5,
-          size1: 1.7,
-          spread: 0.8,
-          up: 1.1,
-          grav: 0.6,
-          opacity: 0.5,
-        });
+    // Soft grey puffs that rise, expand and fade — tyre smoke on handbrake
+    // turns and hard launches.
+    spawnSmoke(pos, amount) {
+      const n = amount || 8;
+      const x = pos ? (pos.x || 0) : 0;
+      const y = (pos ? (pos.y || 0) : 0) + 0.3;
+      const z = pos ? (pos.z || 0) : 0;
+      for (let i = 0; i < n; i++) {
+        const sprite = spawnSprite(
+          x + rand(-0.4, 0.4), y + rand(0, 0.3), z + rand(-0.4, 0.4),
+          0x9a9a9a, rand(0.6, 1.0), 0.55,
+        );
+        addParticle(sprite, { x: rand(-0.4, 0.4), y: rand(0.5, 1.1), z: rand(-0.4, 0.4) }, rand(0.7, 1.2), 1.6);
       }
     },
 
-    sparks(pos, count = 10) {
-      for (let i = 0; i < count; i++) {
-        spawn(pos, {
-          color: Math.random() < 0.5 ? 0xffb020 : 0xff7a1a,
-          life: 0.25 + Math.random() * 0.25,
-          size0: 0.22,
-          size1: 0.1,
-          spread: 6,
-          up: 2.5,
-          grav: -9,
-          opacity: 0.95,
-        });
+    // Bright orange flecks that fly out fast and die quickly — collisions.
+    spawnSparks(pos, amount) {
+      const n = amount || 10;
+      const x = pos ? (pos.x || 0) : 0;
+      const y = (pos ? (pos.y || 0) : 0) + 0.5;
+      const z = pos ? (pos.z || 0) : 0;
+      for (let i = 0; i < n; i++) {
+        const sprite = spawnSprite(x, y, z, 0xffb03a, rand(0.15, 0.3), 0.95);
+        addParticle(sprite, {
+          x: rand(-4, 4), y: rand(1, 5), z: rand(-4, 4),
+        }, rand(0.25, 0.5), -0.1);
       }
     },
 
-    flash(pos) {
-      spawn(pos, {
-        color: 0xfff3b0,
-        life: 0.16,
-        size0: 0.6,
-        size1: 2.4,
-        spread: 0.2,
-        up: 0,
-        grav: 0,
-        opacity: 1,
-      });
+    // One bright flash at a gun barrel / impact point, gone in a blink.
+    spawnMuzzleFlash(pos) {
+      const x = pos ? (pos.x || 0) : 0;
+      const y = (pos ? (pos.y || 0) : 0) + 1.2;
+      const z = pos ? (pos.z || 0) : 0;
+      const sprite = spawnSprite(x, y, z, 0xffe9a0, 1.1, 1.0);
+      addParticle(sprite, { x: 0, y: 0, z: 0 }, 0.12, 2.5);
     },
 
+    // Advance every live particle: move, grow, fade, remove when dead.
     update(dt) {
-      let alive = 0;
-      for (const p of pool) {
-        if (!p.active) continue;
-        alive++;
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
         p.life -= dt;
         if (p.life <= 0) {
-          p.active = false;
-          p.sprite.visible = false;
-          p.material.opacity = 0;
+          scene.remove(p.sprite);
+          p.sprite.material.dispose();
+          particles.splice(i, 1);
           continue;
         }
-        p.vel.y += p.grav * dt;
         p.sprite.position.x += p.vel.x * dt;
         p.sprite.position.y += p.vel.y * dt;
         p.sprite.position.z += p.vel.z * dt;
-        const t = 1 - p.life / p.maxLife;
-        const size = p.size0 + (p.size1 - p.size0) * t;
-        p.sprite.scale.set(size, size, 1);
-        p.material.opacity = (p.life / p.maxLife) * 0.85;
+        const t = p.life / p.maxLife; // 1 at birth, 0 at death
+        p.sprite.material.opacity = 0.9 * t;
+        const s = p.sprite.scale.x + p.grow * dt;
+        p.sprite.scale.setScalar(Math.max(s, 0.05));
       }
-      this.alive = alive;
+    },
+
+    clear() {
+      for (const p of particles) {
+        scene.remove(p.sprite);
+        p.sprite.material.dispose();
+      }
+      particles.length = 0;
+    },
+
+    get count() {
+      return particles.length;
     },
   };
 

@@ -1,212 +1,230 @@
-import * as THREE from 'three';
+// police.js — Velora Heat (chunk 2)
+// Wanted system + pursuit cars. Built from the spec contract only:
+// createPolice(scene, city, makeCar) holds the wanted level (0–5 stars), an
+// escape meter, and a list of pursuit cars. It spawns police cars when wanted
+// rises, has them chase the player, and lowers wanted when the player stays
+// out of the search area long enough. Exposes raiseWanted, lowerWanted, the
+// current wanted level, the escape progress, and an update function.
+// THREE comes from the global loaded by index.html (./vendor/three.min.js).
+
 import { CONFIG } from './config.js';
 import { rand, pick, clamp } from './util.js';
 
-// Police and the wanted system for Velora Heat. Wanted runs 0 to 5 stars.
-// Raising wanted spawns pursuit cars (one per star, up to three); they steer
-// straight at the player and cut across blocks, light bars flashing. The
-// player is busted if a pursuit car stays glued to them for over two and a
-// half seconds. Wanted falls when the player stays out of the search area
-// long enough: the escape meter fills while every pursuit car is far away,
-// and a full meter drops one star.
+function three() {
+  const T = globalThis.THREE;
+  if (!T) throw new Error('THREE global is not loaded — index.html must load ./vendor/three.min.js before main.js');
+  return T;
+}
 
-function tun(keys, fallback) {
-  const c = CONFIG || {};
-  for (const k of keys) {
-    const parts = k.split('.');
-    let v = c;
-    let ok = true;
-    for (const p of parts) {
-      if (v && typeof v === 'object' && p in v) v = v[p];
-      else { ok = false; break; }
+function cfgNum(paths, fallback) {
+  for (const path of paths) {
+    let v = CONFIG;
+    for (const key of path.split('.')) {
+      if (v === undefined || v === null) break;
+      v = v[key];
     }
-    if (ok && typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
   }
   return fallback;
 }
 
-function toXZ(v) {
-  if (!v) return null;
-  if (Array.isArray(v)) {
-    if (v.length >= 3) return { x: v[0], z: v[2] };
-    if (v.length >= 2) return { x: v[0], z: v[1] };
-    return null;
-  }
-  if (typeof v === 'object' && typeof v.x === 'number' && typeof v.z === 'number') {
-    return { x: v.x, z: v.z };
-  }
+function pointXZ(p) {
+  if (!p) return null;
+  if (Array.isArray(p)) return { x: p[0] || 0, z: p[2] !== undefined ? p[2] : p[1] || 0 };
+  if (typeof p.x === 'number' && typeof p.z === 'number') return { x: p.x, z: p.z };
+  if (typeof p.x === 'number' && typeof p.y === 'number') return { x: p.x, z: p.y };
   return null;
 }
 
-function normRoads(city) {
-  const c = city || {};
-  const raw = c.roads || c.roadSegments || c.segments || c.network || c.roadsList || [];
-  const out = [];
-  if (Array.isArray(raw)) {
-    for (const s of raw) {
-      if (!s) continue;
-      const a = toXZ(s.start || s.a || s.from || s.p0);
-      const b = toXZ(s.end || s.b || s.to || s.p1);
-      if (!a || !b) continue;
-      const dx = b.x - a.x;
-      const dz = b.z - a.z;
-      const len = Math.hypot(dx, dz);
-      if (len < 0.01) continue;
-      out.push({ ax: a.x, az: a.z, bx: b.x, bz: b.z, dx: dx / len, dz: dz / len, len });
-    }
-  }
-  return out;
+function dist2(ax, az, bx, bz) {
+  const dx = ax - bx;
+  const dz = az - bz;
+  return dx * dx + dz * dz;
 }
 
-// createPolice(scene, city, makeCar): returns the police system. It exposes
-// wanted (0–5), escapeProgress (0–1), pursuit (live pursuit car entries),
-// busted (bool), onBusted (callback or null), raiseWanted(n),
-// lowerWanted(n), and update(dt, playerPos, playerSpeed, playerDriving).
-// Each pursuit entry is { group, speed, heading }.
 export function createPolice(scene, city, makeCar) {
-  const roads = normRoads(city);
-  const maxPursuit = 3;
-  const pursuitSpeed = tun(['police.speed', 'police.pursuitSpeed', 'policeSpeed'], 32);
-  const searchRadius = tun(['police.searchRadius', 'wanted.searchRadius', 'searchRadius'], 55);
-  const escapeTime = tun(['wanted.escapeTime', 'police.escapeTime', 'escapeTime'], 8);
-  const bustedTime = tun(['police.bustedTime', 'wanted.bustedTime', 'bustedTime'], 2.5);
-  const bustedDist = tun(['police.bustedDistance', 'wanted.bustedDistance', 'bustedDistance'], 3.5);
+  const THREE = three();
+  const rawSpawns = (city && (city.carSpawns || city.carSpawnPoints || city.spawns)) || [];
+  const carSpawns = rawSpawns.map(pointXZ).filter(Boolean);
+
+  const escapeTime = cfgNum(['wanted.escapeTime', 'wanted.escapeSeconds', 'police.escapeTime'], 12);
+  const searchRadius = cfgNum(['wanted.searchRadius', 'police.searchRadius'], 70);
+  const chaseTop = cfgNum(['police.topSpeed', 'police.chaseSpeed'], 46);
+  const spawnDist = cfgNum(['police.spawnDistance', 'police.spawnDist'], 90);
+  const maxPursuit = 5;
 
   const police = {
-    scene,
-    city,
-    roads,
-    wanted: 0,
-    escapeProgress: 0,
-    pursuit: [],
-    busted: false,
-    onBusted: null,
-    _bustedTimer: 0,
-    _flashPhase: 0,
+    wanted: 0, // 0–5 stars
+    escapeMeter: 0, // seconds hidden from the search area
+    pursuit: [], // live pursuit cars: { group, speed, sirenPhase }
+    _hiddenTime: 0,
 
-    raiseWanted(n = 1) {
-      this.wanted = clamp(this.wanted + n, 0, 5);
-      this.escapeProgress = 0;
-      this._syncPursuit();
+    get wantedLevel() {
+      return police.wanted;
     },
 
-    lowerWanted(n = 1) {
-      this.wanted = clamp(this.wanted - n, 0, 5);
-      this.escapeProgress = 0;
-      this._syncPursuit();
+    get escapeProgress() {
+      if (police.wanted === 0) return 0;
+      return clamp(police.escapeMeter / escapeTime, 0, 1);
     },
 
-    _spawnCar(playerPos) {
-      const group = makeCar('white', 'police', null);
-      // Spawn on a road near the player when possible, else at an offset.
-      let x = playerPos.x + rand(-45, 45);
-      let z = playerPos.z + rand(-45, 45);
-      if (roads.length) {
-        const near = roads.filter((s) => {
-          const mx = (s.ax + s.bx) / 2;
-          const mz = (s.az + s.bz) / 2;
-          return Math.hypot(mx - playerPos.x, mz - playerPos.z) < 70;
-        });
-        const seg = near.length ? pick(near) : pick(roads);
-        const t = rand(0, seg.len);
-        x = seg.ax + seg.dx * t;
-        z = seg.az + seg.dz * t;
+    // Alias used by the HUD-facing code in main.js.
+    get cars() {
+      return police.pursuit;
+    },
+
+    raiseWanted(amount) {
+      const n = amount === undefined ? 1 : amount;
+      police.wanted = clamp(police.wanted + n, 0, 5);
+      police.escapeMeter = 0;
+      police._hiddenTime = 0;
+      police.syncPursuit();
+      return police.wanted;
+    },
+
+    lowerWanted(amount) {
+      const n = amount === undefined ? 1 : amount;
+      police.wanted = clamp(police.wanted - n, 0, 5);
+      police.escapeMeter = 0;
+      police._hiddenTime = 0;
+      police.syncPursuit();
+      return police.wanted;
+    },
+
+    setWanted(n) {
+      police.wanted = clamp(Math.round(n) || 0, 0, 5);
+      police.escapeMeter = 0;
+      police._hiddenTime = 0;
+      police.syncPursuit();
+      return police.wanted;
+    },
+
+    clearWanted() {
+      return police.setWanted(0);
+    },
+
+    reset() {
+      police.clearWanted();
+    },
+
+    // How many pursuit cars the current wanted level calls for.
+    desiredCount() {
+      return Math.min(police.wanted, maxPursuit);
+    },
+
+    spawnPursuitCar(playerPos) {
+      const group = makeCar('white', 'police', undefined);
+      // Spawn on a road / car spawn near the player but not on top of them.
+      let x = 0;
+      let z = 0;
+      if (playerPos) {
+        const angle = Math.random() * Math.PI * 2;
+        const d = spawnDist + rand(0, 40);
+        x = playerPos.x + Math.cos(angle) * d;
+        z = playerPos.z + Math.sin(angle) * d;
+      } else if (carSpawns.length) {
+        const s = pick(carSpawns);
+        x = s.x;
+        z = s.z;
       }
       group.position.set(x, 0, z);
-      group.rotation.y = Math.atan2(playerPos.x - x, playerPos.z - z);
+      group.rotation.y = Math.random() * Math.PI * 2;
       scene.add(group);
-      return { group, speed: 0, heading: group.rotation.y };
+      const rec = { group, speed: 0, sirenPhase: Math.random() * Math.PI * 2 };
+      police.pursuit.push(rec);
+      return rec;
     },
 
-    _syncPursuit(playerPos) {
-      const want = this.wanted === 0 ? 0 : Math.min(this.wanted, maxPursuit);
-      const pos = playerPos || { x: 0, z: 0 };
-      while (this.pursuit.length < want) {
-        this.pursuit.push(this._spawnCar(pos));
-      }
-      while (this.pursuit.length > want) {
-        const entry = this.pursuit.pop();
-        scene.remove(entry.group);
+    despawnPursuitCar(rec) {
+      const i = police.pursuit.indexOf(rec);
+      if (i !== -1) police.pursuit.splice(i, 1);
+      scene.remove(rec.group);
+    },
+
+    // Add or remove pursuit cars until the count matches the wanted level.
+    syncPursuit(playerPos) {
+      const want = police.desiredCount();
+      while (police.pursuit.length < want) police.spawnPursuitCar(playerPos);
+      while (police.pursuit.length > want) {
+        police.despawnPursuitCar(police.pursuit[police.pursuit.length - 1]);
       }
     },
 
-    update(dt, playerPos, playerSpeed, playerDriving) {
-      if (this.busted) return;
-      if (this.wanted === 0) {
-        this.escapeProgress = 0;
-        this._bustedTimer = 0;
-        if (this.pursuit.length) this._syncPursuit(playerPos);
+    // target: player position ({x,z} / Vector3) or the player object.
+    // dt: seconds since last frame.
+    update(dt, target) {
+      const pos = target && target.position ? target.position : target;
+      const px = pos ? (pos.x || 0) : 0;
+      const pz = pos ? (pos.z || 0) : 0;
+
+      if (police.wanted === 0) {
+        police.escapeMeter = 0;
+        police._hiddenTime = 0;
+        if (police.pursuit.length) police.syncPursuit();
         return;
       }
-      const px = playerPos ? playerPos.x : 0;
-      const pz = playerPos ? playerPos.z : 0;
-      this._flashPhase += dt * 9;
-      const flashOn = Math.sin(this._flashPhase) > 0;
 
+      // Flash the light bars: red and blue alternate.
+      const flash = Math.sin(performance.now() / 140) > 0;
+      for (const rec of police.pursuit) {
+        const bar = rec.group.userData.lightBar;
+        if (bar) {
+          bar.redMat.emissiveIntensity = flash ? 2.2 : 0.15;
+          bar.blueMat.emissiveIntensity = flash ? 0.15 : 2.2;
+        }
+      }
+
+      // Nearest pursuit car decides whether the player is "seen".
       let nearest = Infinity;
-      let touching = false;
-      for (const entry of this.pursuit) {
-        const g = entry.group;
-        // Steer toward the player, cutting across blocks.
+      for (const rec of police.pursuit) {
+        const d = Math.sqrt(dist2(rec.group.position.x, rec.group.position.z, px, pz));
+        if (d < nearest) nearest = d;
+      }
+
+      if (nearest > searchRadius) {
+        police._hiddenTime += dt;
+        police.escapeMeter = police._hiddenTime;
+        if (police._hiddenTime >= escapeTime) {
+          police.lowerWanted(1);
+        }
+      } else {
+        police._hiddenTime = 0;
+        police.escapeMeter = 0;
+      }
+
+      // Chase: steer toward the player, accelerate, and nudge them when close.
+      for (const rec of police.pursuit) {
+        const g = rec.group;
         const dx = px - g.position.x;
         const dz = pz - g.position.z;
-        const dist = Math.hypot(dx, dz);
-        if (dist < nearest) nearest = dist;
-        const wantHeading = Math.atan2(dx, dz);
-        let dh = wantHeading - entry.heading;
-        while (dh > Math.PI) dh -= Math.PI * 2;
-        while (dh < -Math.PI) dh += Math.PI * 2;
+        const d = Math.hypot(dx, dz) || 1;
+        const desiredHeading = Math.atan2(dx, dz);
+        let diff = desiredHeading - g.rotation.y;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
         const turnRate = 2.4;
-        entry.heading += clamp(dh, -turnRate * dt, turnRate * dt);
-        g.rotation.y = entry.heading;
-        // Close in fast, ease off to a tailing speed when very close, and
-        // stop dead once on top of the player so the car stays glued while
-        // the busted timer runs (otherwise it would drive straight past).
-        const targetSpeed = dist < bustedDist ? 0
-          : dist < 6 ? 6
-          : pursuitSpeed + this.wanted * 1.5;
-        entry.speed += clamp(targetSpeed - entry.speed, -20 * dt, 12 * dt);
-        g.position.x += Math.sin(entry.heading) * entry.speed * dt;
-        g.position.z += Math.cos(entry.heading) * entry.speed * dt;
-        // Flash the light bar: red and blue alternate.
-        const bar = g.userData && g.userData.lightBar;
-        if (bar) {
-          if (bar.red && bar.red.material) bar.red.material.emissiveIntensity = flashOn ? 2.2 : 0.25;
-          if (bar.blue && bar.blue.material) bar.blue.material.emissiveIntensity = flashOn ? 0.25 : 2.2;
-        }
-        // Spin the wheels.
-        const w = g.userData && g.userData.wheels;
-        if (w) {
-          const spin = (entry.speed / (g.userData.wheelRadius || 0.36)) * dt;
-          for (const key of ['frontL', 'frontR', 'rearL', 'rearR']) {
-            const pivot = w[key];
-            if (pivot && pivot.userData.tyre) pivot.userData.tyre.rotation.x += spin;
-          }
-        }
-        if (dist < bustedDist) touching = true;
-      }
+        g.rotation.y += clamp(diff, -turnRate * dt, turnRate * dt);
 
-      // Busted: a pursuit car glued to the player for over bustedTime.
-      if (touching) {
-        this._bustedTimer += dt;
-        if (this._bustedTimer >= bustedTime) {
-          this.busted = true;
-          if (typeof this.onBusted === 'function') this.onBusted();
-        }
-      } else {
-        this._bustedTimer = Math.max(0, this._bustedTimer - dt * 2);
-      }
+        // Close in fast when far, ease off to avoid orbiting when on top.
+        const targetSpeed = d > 12 ? chaseTop : Math.min(chaseTop, 18);
+        rec.speed += clamp(targetSpeed - rec.speed, -14 * dt, 9 * dt);
+        if (rec.speed < 0) rec.speed = 0;
 
-      // Escape: every pursuit car far away fills the meter; one car close
-      // drains it. A full meter drops one wanted star.
-      if (nearest > searchRadius) {
-        this.escapeProgress += dt / escapeTime;
-        if (this.escapeProgress >= 1) {
-          this.escapeProgress = 0;
-          this.lowerWanted(1);
+        const fx = Math.sin(g.rotation.y);
+        const fz = Math.cos(g.rotation.y);
+        g.position.x += fx * rec.speed * dt;
+        g.position.z += fz * rec.speed * dt;
+
+        const wheels = g.userData.wheels || [];
+        const spin = (rec.speed * dt) / (g.userData.wheelRadius || 0.36);
+        for (const wheel of wheels) wheel.rotation.x += spin;
+
+        // A pursuit car that lost the player far away re-joins from a spawn.
+        if (d > 320) {
+          const angle = Math.random() * Math.PI * 2;
+          g.position.set(px + Math.cos(angle) * spawnDist, 0, pz + Math.sin(angle) * spawnDist);
+          rec.speed = chaseTop * 0.5;
         }
-      } else {
-        this.escapeProgress = Math.max(0, this.escapeProgress - dt / (escapeTime * 0.5));
       }
     },
   };

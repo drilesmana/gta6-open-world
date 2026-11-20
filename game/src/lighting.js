@@ -1,40 +1,41 @@
-// Velora Heat — golden-hour light rig. One warm directional sun with shadows,
-// a cool sky fill from above, and a soft ambient lift. The main loop can move
-// the sun each frame; this module only builds the rig.
-
-import * as THREE from 'three';
+// Velora Heat — golden-hour lighting: warm low sun, cool sky fill.
+import * as THREE from '../vendor/three.min.js';
 import { CONFIG } from './config.js';
 
-// Add the lights to the scene and return the sun light so the caller can move
-// it (for example to keep its shadow frustum centred on the player).
 export function setupLighting(scene) {
-  const p = CONFIG.palette;
-  const r = CONFIG.render;
+  const elev = (CONFIG.sunElevation * Math.PI) / 180;
+  const azim = (CONFIG.sunAzimuth * Math.PI) / 180;
+  const sunDir = new THREE.Vector3(
+    Math.cos(elev) * Math.sin(azim),
+    Math.sin(elev),
+    Math.cos(elev) * Math.cos(azim),
+  );
 
-  // Warm low sun, the key light. Shadows on, frustum fitted to the city.
-  const sun = new THREE.DirectionalLight(p.sun, 2.8);
-  sun.position.set(90, 110, 55);
+  // Warm directional sun with shadows.
+  const sun = new THREE.DirectionalLight(0xffb36b, 2.6);
+  sun.position.copy(sunDir).multiplyScalar(300);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(r.shadowMapSize, r.shadowMapSize);
-  const cam = sun.shadow.camera;
-  cam.near = 10;
-  cam.far = 420;
-  cam.left = -r.shadowExtent;
-  cam.right = r.shadowExtent;
-  cam.top = r.shadowExtent;
-  cam.bottom = -r.shadowExtent;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.left = -220;
+  sun.shadow.camera.right = 220;
+  sun.shadow.camera.top = 220;
+  sun.shadow.camera.bottom = -220;
+  sun.shadow.camera.near = 10;
+  sun.shadow.camera.far = 700;
   sun.shadow.bias = -0.0004;
-  sun.shadow.normalBias = 0.03;
   scene.add(sun);
   scene.add(sun.target);
 
-  // Cool sky from above, warm bounce from the ground.
-  const hemi = new THREE.HemisphereLight(0xbfd9ff, p.sunGround, 0.9);
+  // Cool sky fill from above.
+  const hemi = new THREE.HemisphereLight(0x8fb8d8, 0x5a4632, 0.9);
   scene.add(hemi);
 
-  // A small warm ambient lift so shadowed faces never go fully black.
-  const ambient = new THREE.AmbientLight(0xffe0b3, 0.25);
+  // Soft ambient so shadowed faces never go black.
+  const ambient = new THREE.AmbientLight(0xffe0b8, 0.35);
   scene.add(ambient);
+
+  // Warm haze toward the horizon.
+  scene.fog = new THREE.Fog(0xf2b98a, CONFIG.fogNear, CONFIG.fogFar);
 
   return sun;
 }
